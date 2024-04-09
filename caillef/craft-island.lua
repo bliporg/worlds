@@ -1,19 +1,25 @@
 Modules = {
-	interaction_module = "github.com/caillef/cubzh-library/interaction:c5ef4cb",
-	inventory_module = "github.com/caillef/cubzh-library/inventory:c5ef4cb",
-	event_logger_module = "github.com/caillef/cubzh-library/event_logger:b9fbc36",
-	areas_module = "github.com/caillef/cubzh-library/areas:320eb91",
-	growth_module = "github.com/caillef/cubzh-library/growth:fdee71d",
-	resources = "github.com/caillef/cubzh-library/craft_island_resources:828e343",
-	bit_writer = "github.com/caillef/cubzh-library/bitwriter:76e9b17",
-	async_loader = "github.com/caillef/cubzh-library/async_loader:73435e4",
-	block_outline = "github.com/caillef/cubzh-library/block_outline:3d85927",
+	-- big bricks
+	inventory_module = "github.com/caillef/cubzh-library/inventory:1037602",
+	areas_module = "github.com/caillef/cubzh-library/areas:28e70ca",
+
+	-- small bricks
+	growth_module = "github.com/caillef/cubzh-library/growth:28e70ca",
+	interaction_module = "github.com/caillef/cubzh-library/interaction:28e70ca",
+	event_logger_module = "github.com/caillef/cubzh-library/event_logger:28e70ca",
+	async_loader = "github.com/caillef/cubzh-library/async_loader:28e70ca",
+	block_outline = "github.com/caillef/cubzh-library/block_outline:28e70ca",
+
+	-- game specific
+	resources = "github.com/caillef/cubzh-library/game_craft_island/resources:52f1992",
+	islands_manager = "github.com/caillef/cubzh-library/game_craft_island/islands_manager:0fbb618",
+
+	ui_blocks = "github.com/caillef/cubzh-library/ui_blocks:09941d5",
 }
 
 -- Config
 local REACH_DIST = 30
 local attackSpeed = 0.3
-local CANCEL_SAVE_SECONDS_INTERVAL = 3
 local SAVE_EVERY = 30 -- seconds
 
 -- Tooltip
@@ -43,9 +49,18 @@ local assetsByPos = {}
 local resourcesByKey = {} -- generated from resources on load before onStart
 local resourcesById = {} -- generated from resources on load before onStart
 
+local blackLoadingBg
+
 Client.OnStart = function()
 	Map.IsHidden = true
 	initAmbience()
+
+	blackLoadingBg = require("uikit"):createFrame(Color.Black)
+	blackLoadingBg.parentDidResize = function()
+		blackLoadingBg.Width = Screen.Width
+		blackLoadingBg.Height = Screen.Height
+	end
+	blackLoadingBg:parentDidResize()
 
 	LocalEvent:Listen("areas.CurrentArea", function(newCurrentArea)
 		currentArea = newCurrentArea
@@ -53,6 +68,12 @@ Client.OnStart = function()
 
 	LocalEvent:Listen(LocalEvent.Name.AvatarLoaded, function()
 		initPlayer()
+		if Player.Animations then
+			-- remove view bobbing
+			Player.Animations.Walk.Duration = 10000
+			-- remove idle animation
+			Player.Animations.Idle.Duration = 10000
+		end
 	end)
 end
 
@@ -73,11 +94,13 @@ Client.OnWorldObjectLoad = function(obj)
 		end
 	elseif obj.Name == "shop_1" then
 		interaction_module:addInteraction(obj, "Farmer", function()
-			print("interact with farmer")
+			sellerUI = createFarmerUI()
+			Pointer:Show()
 		end)
 	elseif obj.Name == "shop_2" then
-		interaction_module:addInteraction(obj, "Baker", function()
-			print("interact with baker")
+		interaction_module:addInteraction(obj, "Merchant", function()
+			furnitureUI = createFurnitureUI()
+			Pointer:Show()
 		end)
 	elseif obj.Name == "invisiblewall" then
 		obj.IsHidden = true
@@ -92,10 +115,16 @@ end
 Client.OnPlayerJoin = function(p)
 	if p == Player then
 		local listLoadCache = {}
+		local texturesList = {}
+		local URL = "https://api.voxdream.art/"
+
 		for _,v in ipairs(resources) do
 			resourcesByKey[v.key] = v
 			resourcesById[v.id] = v
 
+			if v.texture then
+				table.insert(texturesList, { name = v.key, url = URL..v.texture })
+			end
 			if v.fullname then
 				table.insert(listLoadCache, function(loadCacheDone)
 					Object:Load(v.fullname, function(obj)
@@ -110,8 +139,33 @@ Client.OnPlayerJoin = function(p)
 				end)
 			end
 		end
+		
+		table.insert(listLoadCache, function(loadCacheDone)
+			textureLoader:load(texturesList, function(textures)				
+				cachedTextures = textures
+				loadCacheDone()
+			end)
+		end)
+
 		async_loader:start(listLoadCache, function()
-			loadIsland(onStart)
+			islands_manager:loadIsland(resourcesByKey, resourcesById,
+				function(_map, _playerIsland, savedAssets, texturedBlocksList)
+					map = _map
+					map.Shadow = true
+					playerIsland = _playerIsland
+					for _,asset in ipairs(savedAssets) do
+						local key = resourcesById[asset.id].key
+						local pos = Number3(asset.X, asset.Y, asset.Z)
+						blockAssetPlacer:placeAsset(key, pos, { force = true })
+					end
+					for _,block in ipairs(texturedBlocksList) do
+						local key = resourcesById[block.id].key
+						local pos = Number3(block.X, block.Y, block.Z)
+						texturedBlocks:placeBlock(key, pos)
+					end
+					onStart()
+				end
+			)
 		end)
 		return
 	end
@@ -157,39 +211,20 @@ function onStart()
 		invBtn.parentDidResize = function()
 			invBtn.pos = { Screen.Width - invBtn.Width - 4, Screen.Height - Screen.SafeArea.Top - invBtn.Height}
 		end
+		invBtn:parentDidResize()
 		invBtn.onRelease = function()
 			LocalEvent:Send("InvToggle", { key = "mainInventory" })
 		end
 	end
 
-
 	-- Portal
 	local asset = blockAssetPlacer:placeAsset("portal", Number3(0,1,8), { force = true })
 	asset.skipSave = true
+	asset.Scale = asset.Scale.X * 1.1
 	asset.OnCollisionBegin = function(o,p)
 		if p ~= Player then return end
 		LocalEvent:Send("areas.TeleportTo", "MainIsland")
 	end
-
-	--[[
-	blockAssetPlacer:placeAsset("oak_tree",Number3(5,1,5), { force = true })
-	blockAssetPlacer:placeAsset("oak_sapling",Number3(-5,1,5))
-
-	map:GetBlock(-5,0,-4):Replace(resourcesByKey.dirt.block.color)
-	blockAssetPlacer:placeAsset("wheat_seed",Number3(-5,1,-4))
-	map:GetBlock(-5,0,-5):Replace(resourcesByKey.dirt.block.color)
-	blockAssetPlacer:placeAsset("wheat_seed",Number3(-5,1,-5))
-	map:GetBlock(-5,0,-6):Replace(resourcesByKey.dirt.block.color)
-	blockAssetPlacer:placeAsset("wheat_seed",Number3(-5,1,-6))
-	map:GetBlock(-4,0,-4):Replace(resourcesByKey.dirt.block.color)
-	blockAssetPlacer:placeAsset("wheat_seed",Number3(-4,1,-4))
-	map:GetBlock(-4,0,-5):Replace(resourcesByKey.dirt.block.color)
-	blockAssetPlacer:placeAsset("wheat_seed",Number3(-4,1,-5))
-	map:GetBlock(-4,0,-6):Replace(resourcesByKey.dirt.block.color)
-	map:GetBlock(-3,0,-4):Replace(resourcesByKey.dirt.block.color)
-	map:GetBlock(-3,0,-5):Replace(resourcesByKey.dirt.block.color)
-	map:GetBlock(-3,0,-6):Replace(resourcesByKey.dirt.block.color)
-	--]]
 
 	initAreas()
 	initMulti()
@@ -218,6 +253,42 @@ function onStart()
 		end
 	end)
 
+	-- Dev debug because of KVS issue in dev mode
+	Timer(2, function()
+	if Player.Username == "caillef" then
+		local baseInventory = {
+			pickaxe = 1,
+			shovel = 1,
+			axe = 1,
+			hoe = 1,
+			wheat_seed = 8,
+			oak_planks = 20,
+		}
+
+		for k,v in pairs(baseInventory) do
+			LocalEvent:Send("InvAdd", {
+				key = "hotbar",
+				rKey = k,
+				amount = v
+			})
+		end
+	end
+	end)
+
+	-- moneyLeaderboard
+	moneyLeaderboardUI = moneyLeaderboardUIModule:create("Money", 5, moneyLeaderboardUIModule.TOP_LEFT)
+	Timer(10, true, function()
+		moneyLeaderboardModule:sync()
+	end)
+	moneyLeaderboardModule:sync()
+	moneyLeaderboardModule.onSyncLeaderboard = function(scores)
+	    for _,v in ipairs(scores) do
+	        v.score = math.floor(v.score)
+	    end
+	    moneyLeaderboardUI:update(scores)
+	end
+
+	-- Block outline
 	LocalEvent:Listen("block_outline.update", function(data)
 		local block = data.block
 		if holdLeftClick and blockMined.Position ~= block.Position then
@@ -227,8 +298,16 @@ function onStart()
 	block_outline:setShape(map)
 	block_outline:setMaxReachDist(REACH_DIST)
 
+	-- Save island
 	Timer(SAVE_EVERY, true, function()
-		craftIslandSave:saveIsland()
+		islands_manager:saveIsland(map, assets, texturedBlocks.list)
+	end)
+
+	-- End loading
+	blackLoadingBg.pos.Z = -500
+	Timer(1, function()
+		require("crosshair"):show()
+		blackLoadingBg:remove()
 	end)
 end
 
@@ -241,6 +320,7 @@ blockAssetPlacer.placeAsset = function(_, key, pos, options)
 	if (not options.growth and not options.force) and resource.canBePlaced == false then return false end
 
 	local asset = Shape(resource.cachedShape, { includeChildren = true })
+	asset.Shadow = true
 
 	table.insert(assets, asset)
 	assetsByPos[pos.Z] = assetsByPos[pos.Z] or {}
@@ -314,7 +394,7 @@ blockAssetPlacer.breakAsset = function(_, asset)
 
 	if asset.info.grow then
 		growth_module:remove(asset)
-		craftIslandSave:saveIsland()
+		islands_manager:saveIsland(map, assets, texturedBlocks.list)
 		return
 	end
 
@@ -329,11 +409,88 @@ blockAssetPlacer.breakAsset = function(_, asset)
 
 	asset:RemoveFromParent()
 
-	craftIslandSave:saveIsland()
+	islands_manager:saveIsland(map, assets, texturedBlocks.list)
 end
 
 blockAssetPlacer.canPlaceAssetAt = function(_, pos)
 	return assetsByPos[pos.Z][pos.Y][pos.X] == nil
+end
+
+blockAssetPlacer.place = function()
+	local impact = Camera:CastRay(nil, Player)
+	if impact.Object and impact.Object == map then
+		if selectedResource.block then
+			local color = selectedResource.block.color
+			LocalEvent:Send("InvRemove", { key = "hotbar", rKey = selectedResource.key, amount = 1,
+				callback = function(success)
+					if not success then return end
+					local impactBlock = Camera:CastRay(impact.Object)
+					impactBlock.Block:AddNeighbor(color, impactBlock.FaceTouched)
+					LocalEvent:Send("SwingRight")
+					require("sfx")("walk_gravel_"..math.random(5), { Spatialized = false, Volume = 0.3 })
+				end
+			})
+			islands_manager:saveIsland(map, assets, texturedBlocks.list)
+			return true
+		elseif selectedResource.asset and selectedResource.canBePlaced ~= false then
+			local rKey = selectedResource.key
+			local impactBlock = Camera:CastRay(impact.Object)
+			local pos = impactBlock.Block.Coords:Copy()
+			if impact.FaceTouched == Face.Front then
+				pos.Z = pos.Z + 1
+			elseif impact.FaceTouched == Face.Back then
+				pos.Z = pos.Z - 1
+			elseif impact.FaceTouched == Face.Top then
+				pos.Y = pos.Y + 1
+			elseif impact.FaceTouched == Face.Bottom then
+				pos.Y = pos.Y - 1
+			elseif impact.FaceTouched == Face.Right then
+				pos.X = pos.X + 1
+			elseif impact.FaceTouched == Face.Left then
+				pos.X = pos.X - 1
+			end
+			local blockUnderneath = resourcesByKey[selectedResource.asset.blockUnderneath]
+			if blockUnderneath and blockUnderneath.block.color ~= impactBlock.Block.Color then
+				return false
+			end
+			if not blockAssetPlacer:canPlaceAssetAt(pos) then return end
+			LocalEvent:Send("InvRemove", { key = "hotbar", rKey = rKey, amount = 1,
+				callback = function(success)
+					if not success then return end
+					blockAssetPlacer:placeAsset(rKey, pos)
+					LocalEvent:Send("SwingRight")
+					require("sfx")("walk_wood_"..math.random(5), { Spatialized = false, Volume = 0.3 })
+				end
+			})
+			islands_manager:saveIsland(map, assets, texturedBlocks.list)
+			return true
+		elseif selectedResource.type == "texturedblock" then
+			local rKey = selectedResource.key
+			LocalEvent:Send("InvRemove", { key = "hotbar", rKey = selectedResource.key, amount = 1,
+				callback = function(success)
+					if not success then return end
+					local impactBlock = Camera:CastRay(impact.Object)
+					local pos = impactBlock.Block.Coords:Copy()
+					if impact.FaceTouched == Face.Front then
+						pos.Z = pos.Z + 1
+					elseif impact.FaceTouched == Face.Back then
+						pos.Z = pos.Z - 1
+					elseif impact.FaceTouched == Face.Top then
+						pos.Y = pos.Y + 1
+					elseif impact.FaceTouched == Face.Bottom then
+						pos.Y = pos.Y - 1
+					elseif impact.FaceTouched == Face.Right then
+						pos.X = pos.X + 1
+					elseif impact.FaceTouched == Face.Left then
+						pos.X = pos.X - 1
+					end
+					texturedBlocks:placeBlock(rKey, pos)
+					islands_manager:saveIsland(map, assets, texturedBlocks.list)
+				end
+			})
+			
+		end
+	end
 end
 
 -- handle left click loop to swing + call "onSwing"
@@ -345,6 +502,13 @@ local POINTER_INDEX_MOUSE_LEFT = 4
 mineModule.init = function(_, actionCallback)
 	mineModule.actionCallback = actionCallback
 end
+
+LocalEvent:Listen(LocalEvent.Name.Tick, function(dt)
+	if not holdLeftClick and blockSwingTimer then
+		blockSwingTimer:Cancel()
+		blockSwingTimer = nil
+	end
+end)
 
 LocalEvent:Listen(LocalEvent.Name.PointerDown, function(pointerEvent)
 	if not Pointer.IsHidden then
@@ -366,10 +530,6 @@ LocalEvent:Listen(LocalEvent.Name.PointerUp, function(pointerEvent)
 		holdLeftClick = false
 		blockMined = nil
 		blockKey = nil
-		if blockSwingTimer then
-			blockSwingTimer:Cancel()
-			blockSwingTimer = nil
-		end
 	end
 end, { topPriority = true })
 
@@ -387,6 +547,9 @@ function startMineBlockInFront()
 		LocalEvent:Send("SwingRight")
 		spawnBreakParticles(Camera.Position + Camera.Forward * impact.Distance, Color.Black)
 		require("sfx")("walk_wood_"..math.random(5), { Spatialized = false, Volume = 0.3 })
+		if blockSwingTimer then
+			blockSwingTimer:Cancel()
+		end
 		blockSwingTimer = Timer(attackSpeed, true, function()
 			local impact = Camera:CastRay(nil, Player)
 			if not impact.Object.root.info or impact.Distance > REACH_DIST then return end
@@ -432,7 +595,16 @@ function startMineBlockInFront()
 			rKey = v.key
 		end
 	end
-	if not rKey then print("Can't find block of color", impactBlock.Block.Color) return end
+	if not rKey then
+		local b = texturedBlocks.list[impactBlock.Block.Coords.Z][impactBlock.Block.Coords.Y][impactBlock.Block.Coords.X]
+		if b then
+			rKey = b.rKey
+		end
+	end
+	if not rKey then
+		print("Can't find block of color", impactBlock.Block.Color)
+		return
+	end
 	if blockMined and blockMined.Coords == impactBlock.Block.Coords then return end
 
 	blockMined = impactBlock.Block
@@ -501,7 +673,7 @@ function handleResourceRightClick()
 		impactBlock.Block:Replace(resourcesByKey.dirt.block.color)
 		LocalEvent:Send("SwingRight")
 		require("sfx")("walk_grass_" .. math.random(5), { Spatialized = false, Volume = 0.3 })
-		craftIslandSave:saveIsland()
+		islands_manager:saveIsland(map, assets, texturedBlocks.list)
 		return true
 	end
 end
@@ -510,53 +682,8 @@ Client.Action3Release = function()
 	if selectedResource.rightClick then
 		if handleResourceRightClick() then return end
 	end
-	local impact = Camera:CastRay(nil, Player)
-	if impact.Object and impact.Object == map then
-		if selectedResource.block then
-			local color = selectedResource.block.color
-			LocalEvent:Send("InvRemove", { key = "hotbar", rKey = selectedResource.key, amount = 1,
-				callback = function(success)
-					if not success then return end
-					local impactBlock = Camera:CastRay(impact.Object)
-					impactBlock.Block:AddNeighbor(color, impactBlock.FaceTouched)
-					LocalEvent:Send("SwingRight")
-					require("sfx")("walk_gravel_"..math.random(5), { Spatialized = false, Volume = 0.3 })
-				end
-			})
-			craftIslandSave:saveIsland()
-		elseif selectedResource.asset and selectedResource.canBePlaced ~= false then
-			local rKey = selectedResource.key
-			local impactBlock = Camera:CastRay(impact.Object)
-			local pos = impactBlock.Block.Coords:Copy()
-			if impact.FaceTouched == Face.Front then
-				pos.Z = pos.Z + 1
-			elseif impact.FaceTouched == Face.Back then
-				pos.Z = pos.Z - 1
-			elseif impact.FaceTouched == Face.Top then
-				pos.Y = pos.Y + 1
-			elseif impact.FaceTouched == Face.Bottom then
-				pos.Y = pos.Y - 1
-			elseif impact.FaceTouched == Face.Right then
-				pos.X = pos.X + 1
-			elseif impact.FaceTouched == Face.Left then
-				pos.X = pos.X - 1
-			end
-			local blockUnderneath = resourcesByKey[selectedResource.asset.blockUnderneath]
-			if blockUnderneath and blockUnderneath.block.color ~= impactBlock.Block.Color then
-				return
-			end
-			if not blockAssetPlacer:canPlaceAssetAt(pos) then return end
-			LocalEvent:Send("InvRemove", { key = "hotbar", rKey = rKey, amount = 1,
-				callback = function(success)
-					if not success then return end
-					blockAssetPlacer:placeAsset(rKey, pos)
-					LocalEvent:Send("SwingRight")
-					require("sfx")("walk_wood_"..math.random(5), { Spatialized = false, Volume = 0.3 })
-				end
-			})
-			craftIslandSave:saveIsland()
-		end
-	end
+
+	if blockAssetPlacer:place() then return end
 
 	if impact.Object and impact.Object.root and impact.Object.root.isInteractable then
 		local interactableObject = impact.Object.root -- all subshapes and root have a reference to root
@@ -579,6 +706,10 @@ function mine()
 	local currentMiningTime = defaultMiningTime * multiplier
 	if  time - blockStartedMiningAt >= currentMiningTime then
 		blockMined:Remove()
+		local texturedBlock = texturedBlocks.list[blockMined.Coords.Z][blockMined.Coords.Y][blockMined.Coords.X]
+		if texturedBlock then
+			texturedBlock:remove()
+		end
 
 		local rKey = blockKey
 		LocalEvent:Send("InvAdd", { key = "hotbar", rKey = rKey, amount = 1,
@@ -592,7 +723,7 @@ function mine()
 			end
 		})
 
-		craftIslandSave:saveIsland()
+		islands_manager:saveIsland(map, assets, texturedBlocks.list)
 		startMineBlockInFront()
 	end
 end
@@ -604,196 +735,6 @@ Client.Tick = function(dt)
 	if holdLeftClick then
 		mine()
 	end
-end
-
--- Map
-
-craftIslandSave = {}
-
-local islandsKey = "islands"
-
-local saveTimer = nil
-craftIslandSave.saveIsland = function()
-	if saveTimer then saveTimer:Cancel() end
-	saveTimer = Timer(CANCEL_SAVE_SECONDS_INTERVAL, function()
-		--print("saving island...")
-		local data = craftIslandSave:serialize(map, assets)
-		local store = KeyValueStore(islandsKey)
-		store:Set(Player.UserID, data, function(success, results)
-			--print("save", success and "success" or "failed")
-		end)
-	end)
-end
-
-craftIslandSave.getIsland = function(_, player, callback)
-	local store = KeyValueStore(islandsKey)
-	store:Get(player.UserID, function(success, results)
-		if not success then error("Can't retrieve island") callback() end
-		callback(results[player.UserID])
-	end)
-end
-
-function colorToStr(color)
-	return string.format("%d-%d-%d", color.R, color.G, color.B)
-end
-
-craftIslandSave.serialize = function(_, map, assets)
-	local blockIdByColors = {}
-	for _,v in ipairs(resources) do
-		if v.type == "block" then
-			blockIdByColors[colorToStr(v.block.color)] = v.id
-		end
-	end
-
-	local d = Data()
-	d:WriteUInt8(1) -- version
-	local nbBlocksAssetsCursor = d.Cursor
-	d:WriteUInt32(0) -- nb blocks and assets
-	local nbBlocksAssets = 0
-
-	local offset = 0
-
-	for z=map.Min.Z,map.Max.Z do
-		for y=map.Min.Y,map.Max.Y do
-			for x=map.Min.X,map.Max.X do
-				local b = map:GetBlock(x,y,z)
-				if b then
-					local id = blockIdByColors[colorToStr(b.Color)]
-					if not id then error("block not recognized") end
-
-					local pos = b.Coords
-					if offset > 0 then
-						d.Cursor = d.Cursor - 1
-					end
-					local rest = bit_writer:writeNumbers(d, {
-						{ value = math.floor(pos.X + 500), size = 10 }, -- x
-						{ value = math.floor(pos.Y + 500), size = 10 }, -- y
-						{ value = math.floor(pos.Z + 500), size = 10 }, -- z
-						{ value = 0, size = 3 }, -- ry
-						{ value = id, size = 11 }, -- id
-						{ value = 0, size = 1 }, -- extra length
-					}, { offset = offset })
-					--offset = 8 - rest
-					nbBlocksAssets = nbBlocksAssets + 1
-				end
-			end
-		end
-	end
-
-	for _,v in ipairs(assets) do
-		if v ~= nil and not v.skipSave then
-			local pos = v.mapPos
-			local id = v.info.id
-			bit_writer:writeNumbers(d, {
-				{ value = math.floor(pos.X + 500), size = 10 }, -- x
-				{ value = math.floor(pos.Y + 500), size = 10 }, -- y
-				{ value = math.floor(pos.Z + 500), size = 10 }, -- z
-				{ value = 0, size = 3 }, -- ry
-				{ value = id, size = 11 }, -- id
-				{ value = 0, size = 1 }, -- extra length
-			})
-			nbBlocksAssets = nbBlocksAssets + 1
-		end
-	end
-
-	d.Cursor = nbBlocksAssetsCursor
-	d:WriteUInt32(nbBlocksAssets)
-	d.Cursor = d.Length
-
-	return d
-end
-
-craftIslandSave.deserialize = function(_, data, callback)
-	local islandInfo = {
-		blocks = {},
-		assets = {}
-	}
-	local version = data:ReadUInt8()
-	if version == 1 then
-		local nbBlocks = data:ReadUInt32()
-		local byteOffset = 0
-		function loadNextBlocksAssets(offset, limit)
-			for i=offset, offset + limit - 1 do
-				if i >= nbBlocks then return callback(islandInfo) end
-				if byteOffset > 0 then
-					data.Cursor = data.Cursor - 1
-				end
-				local blockOrAsset = bit_writer:readNumbers(data, {
-					{ key = "X", size = 10 }, -- x
-					{ key = "Y", size = 10 }, -- y
-					{ key = "Z", size = 10 }, -- z
-					{ key = "ry", size = 3 }, -- ry
-					{ key = "id", size = 11 }, -- id
-					{ key = "extraLength", size = 1 }, -- extra length
-				}, { offset = byteOffset })
-
-				blockOrAsset.X = blockOrAsset.X - 500
-				blockOrAsset.Y = blockOrAsset.Y - 500
-				blockOrAsset.Z = blockOrAsset.Z - 500
-
-				if resources[blockOrAsset.id].block then
-					table.insert(islandInfo.blocks, blockOrAsset)
-				else
-					table.insert(islandInfo.assets, blockOrAsset)
-				end
-			end
-			Timer(0.02, function() loadNextBlocksAssets(offset + limit, limit) end)
-		end
-		loadNextBlocksAssets(0, 500)
-	else
-		error(string.format("version %d not valid", version))
-	end
-end
-
-function loadIsland(callback)
-	playerIsland = Object()
-
-	map = MutableShape()
-	map.Shadow = true
-	map:SetParent(World)
-	map.Physics = PhysicsMode.StaticPerBlock
-	map.Scale = 7.5
-	map.Pivot.Y = 1
-
-	craftIslandSave:getIsland(Player, function(islandData)
-		if not islandData then
-			for z=-10,10 do
-				for y=-10,0 do
-					for x=-10,10 do
-						map:AddBlock(resourcesByKey[y == 0 and "grass" or (y < -3 and "stone" or "dirt")].block.color,x,y,z)
-					end
-				end
-			end
-
-			blockAssetPlacer:placeAsset("oak_tree",Number3(5,1,5), { force = true })
-			blockAssetPlacer:placeAsset("oak_sapling",Number3(-5,1,5))
-
-			map:GetBlock(-5,0,-4):Replace(resourcesByKey.dirt.block.color)
-			blockAssetPlacer:placeAsset("wheat_seed",Number3(-5,1,-4))
-			map:GetBlock(-5,0,-5):Replace(resourcesByKey.dirt.block.color)
-			blockAssetPlacer:placeAsset("wheat_seed",Number3(-5,1,-5))
-			map:GetBlock(-5,0,-6):Replace(resourcesByKey.dirt.block.color)
-			blockAssetPlacer:placeAsset("wheat_seed",Number3(-5,1,-6))
-			map:GetBlock(-4,0,-4):Replace(resourcesByKey.dirt.block.color)
-			blockAssetPlacer:placeAsset("wheat_seed",Number3(-4,1,-4))
-			map:GetBlock(-4,0,-5):Replace(resourcesByKey.dirt.block.color)
-			blockAssetPlacer:placeAsset("wheat_seed",Number3(-4,1,-5))
-			map:GetBlock(-4,0,-6):Replace(resourcesByKey.dirt.block.color)
-			map:GetBlock(-3,0,-4):Replace(resourcesByKey.dirt.block.color)
-			map:GetBlock(-3,0,-5):Replace(resourcesByKey.dirt.block.color)
-			map:GetBlock(-3,0,-6):Replace(resourcesByKey.dirt.block.color)
-			return callback(map)
-		end
-		craftIslandSave:deserialize(islandData, function(islandInfo)
-			for _,b in ipairs(islandInfo.blocks) do
-				map:AddBlock(resourcesById[b.id].block.color, b.X, b.Y, b.Z)
-			end
-			for _,a in ipairs(islandInfo.assets) do
-				blockAssetPlacer:placeAsset(resourcesById[a.id].key, Number3(a.X, a.Y, a.Z), { force = true })
-			end
-			callback(map)
-		end)
-	end)
 end
 
 -- Particles
@@ -810,20 +751,22 @@ function spawnBreakParticles(pos, color)
 end
 
 -- Server
+
 Server.OnPlayerLeave = function(p)
 	local eventLogger = {}
 	eventLogger.log = function(_, player, eventName, eventData, callback)
 		local store = KeyValueStore("eventlogger")
 		store:Get(player.UserID, function(success, results)
 			if not success then
-				error("Can't access event logger")
+				-- print("warning: Can't access event logger")
+				return
 			end
 			local data = results[player.UserID] or {}
 			data[eventName] = data[eventName] or {}
 			table.insert(data[eventName], eventData)
 			store:Set(player.UserID, data, function(success)
 				if not success then
-					error("Can't access event logger")
+					-- error("Can't access event logger")
 				end
 				if not callback then
 					return
@@ -834,7 +777,6 @@ Server.OnPlayerLeave = function(p)
 	end
 	eventLogger:log(p, "sessionsEndLog", { v = 1, date = Time.Unix() })
 end
-
 
 -- Init
 
@@ -878,8 +820,11 @@ function initPlayer()
 	Player:SetParent(World)
 	Camera.FOV = 80
 	require("object_skills").addStepClimbing(Player, { mapScale = 6 })
-	require("crosshair"):show()
 	Camera:SetModeFirstPerson()
+	if Player.EyeLidRight then
+		Player.EyeLidRight:RemoveFromParent()
+		Player.EyeLidLeft:RemoveFromParent()
+	end
 
 	mineModule:init(startMineBlockInFront)
 end
@@ -994,4 +939,732 @@ function initKeyboardShortcuts()
 			LocalEvent:Send("InvToggle", { key = "mainInventory" })
 		end
 	end)
+end
+
+-- Leaderboard
+
+
+moneyLeaderboardModule = {}
+moneyLeaderboardModuleMetatable = {
+	__index = {
+		sync = function(self)
+			local store = KeyValueStore("mlb_leaderboard")
+			store:Get("scores", function(success, results)
+				local scores = results.scores or {}
+				if self.onSyncLeaderboard then
+					self.onSyncLeaderboard(self:_sortScores(scores))
+				end
+			end)
+		end,
+		onPlayerJoin = function(self)
+			self:sync()
+		end,
+		setScore = function(self, score)
+			local store = KeyValueStore("mlb_leaderboard")
+			store:Get("scores", function(success, results)
+			    if not success then print("Error: can't access leaderboard") return end
+				local scores = results.scores or {}
+				scores[Player.UserID] = { username = Player.Username, score = score }
+				store:Set("scores", scores, function()
+					if self.onSyncLeaderboard then
+						self.onSyncLeaderboard(self:_sortScores(scores))
+					end
+				end)
+			end)
+		end,
+		_sortScores = function(self, scores)
+			local sortedScores = {}
+			for _, info in pairs(scores) do
+				table.insert(sortedScores, info)
+			end
+			table.sort(sortedScores, function(a, b)
+				return a.score > b.score
+			end)
+			return sortedScores
+		end,
+	}
+}
+setmetatable(moneyLeaderboardModule, moneyLeaderboardModuleMetatable)
+
+if type(Client.IsMobile) == "boolean" then -- only for client
+	LocalEvent:Listen(LocalEvent.Name.OnPlayerJoin, function(p)
+		moneyLeaderboardModule:onPlayerJoin(p)
+	end)
+end
+
+moneyLeaderboardUIModule = {}
+local moneyLeaderboardUIModuleMetatable = {
+	__index = {
+		TOP_LEFT = 1,
+		TOP_RIGHT = 2,
+		create = function(self, title, nbScores, anchor)
+			local ui = require("uikit")
+			local anchor = anchor or self.TOP_LEFT
+			local nbScores = nbScores or 5
+
+			local bg = ui:createFrame(Color(0.0,0.0,0.0,0.5))
+
+			local title = ui:createText(title or "Money")
+			title:setParent(bg)
+			title.object.Color = Color.White
+			title.object.Anchor = { 0.5, 0.5}
+			title.LocalPosition.Z = -1
+
+			local entries = {}
+			for i=1,nbScores do
+				local entry = ui:createFrame()
+				entry:setParent(bg)
+				table.insert(entries, entry)
+
+				local name = ui:createText("")
+				entry.name = name
+				name:setParent(entry)
+				name.object.Color = Color.White
+				name.object.Anchor = { 0, 0.5 }
+				name.LocalPosition.Z = -1
+
+				local score = ui:createText("")
+				entry.score = score
+				score:setParent(entry)
+				score.object.Color = Color.White
+				score.object.Anchor = { 1, 0.5 }
+				score.LocalPosition.Z = -1
+			end
+
+			bg.parentDidResize = function()
+				local width = math.max(225, title.Width + 10)
+				bg.Width = width
+
+				local height = title.Height + 6
+				for k,e in ipairs(entries) do
+					e.Width = width
+					e.Height = e.name.Height + 6
+					height = height + e.Height
+
+					e.LocalPosition.Y = (nbScores - k) * e.Height
+					e.name.LocalPosition = Number3(5, e.Height / 2, 0)
+					e.score.LocalPosition = Number3(e.Width - 5, e.Height / 2, 0)
+				end
+				bg.Height = height
+				title.LocalPosition = Number3(width / 2, height - title.Height / 2 - 3, 0)
+
+				local posX = 0
+				if anchor == self.TOP_RIGHT then
+					posX = Screen.Width - bg.Width
+				end
+				bg.LocalPosition = Number3(posX, Screen.Height - bg.Height - Screen.SafeArea.Top, 0)
+			end
+			bg:parentDidResize()
+
+			bg.update = function(bg, list)
+				for k,entry in ipairs(entries) do
+					local data = list[k]
+					local name = data.username or ""
+					local score = data.score or ""
+					if #name > 15 then
+						name = string.sub(name,1,12).."..."
+					end
+					entry.name.object.Text = name
+					entry.score.object.Text = tostring(score)
+				end
+			end
+
+			return bg
+		end
+	}
+}
+setmetatable(moneyLeaderboardUIModule,moneyLeaderboardUIModuleMetatable)
+
+cachedTextures = {}
+--[[
+	USAGE
+	local texturesList = {
+		{ name = "wall", url = "" },
+		{ name = "ground", url = "" },
+		{ name = "goblin_1", url = "" },
+		{ name = "goblin_2", url = "" }
+	}
+	textureLoader:load(texturesList, function (listOfTextures) end)
+--]]
+textureLoader = {}
+textureLoader.load = function(_, list, onDone)
+	local nbList = #list
+	local nbLoaded = 0
+	local textures = {}
+	for _,v in ipairs(list) do
+		HTTP:Get(v.url, function(res)
+			textures[v.name] = res.Body
+			nbLoaded = nbLoaded + 1
+			if nbLoaded >= nbList then
+				onDone(textures)
+			end
+		end)
+	end
+end
+
+
+
+money = {
+	amount = 0,
+	uiNode = nil
+}
+
+money.updateUI = function(self)
+	if not self.uiNode then
+		self.uiNode = require("uikit"):createText("0 💰", Color.White, "big")
+		ui_blocks:anchorNode(self.uiNode, "right", "top", 15)
+	end
+	self.uiNode.Text = string.format("%d 💰", self.amount)
+	self.uiNode:parentDidResize()
+end
+
+money.sync = function(self)
+	local moneyStore = KeyValueStore("money")
+	moneyStore:Get(Player.UserID, function(success, results)
+		self.amount = results[Player.UserID] or 0
+		self:updateUI()
+	end)
+end
+
+LocalEvent:Listen(LocalEvent.Name.OnPlayerJoin, function(p)
+	if p ~= Player then return end
+	money:sync()
+end)
+
+local setMoneyKvsRequest
+money.add = function(self, amount)
+	if amount <= 0 then return end
+	self.amount = self.amount + amount
+	self:updateUI()
+
+	moneyLeaderboardModule:setScore(self.amount)
+
+	local moneyStore = KeyValueStore("money")
+	if setMoneyKvsRequest then setMoneyKvsRequest:Cancel() end
+	setMoneyKvsRequest = moneyStore:Set(Player.UserID, self.amount, function(success)
+		setMoneyKvsRequest = nil
+		if not success then return print("Can't save coins") end
+	end)
+end
+
+money.remove = function(self, amount)
+	if amount <= 0 then return end
+	if amount > self.amount then return error("Not enough coins") end
+	self.amount = self.amount - amount
+	self:updateUI()
+
+	moneyLeaderboardModule:setScore(self.amount)
+
+	local moneyStore = KeyValueStore("money")
+	if setMoneyKvsRequest then setMoneyKvsRequest:Cancel() end
+	setMoneyKvsRequest = moneyStore:Set(Player.UserID, self.amount, function(success)
+		setMoneyKvsRequest = nil
+		if not success then return print("Can't save coins") end
+	end)
+end
+
+
+
+createFarmerUI = function()
+	local ui = require("uikit")
+
+	local node
+
+	local title = ui:createText("Merchant", Color.White, "small")
+	local closeBtn = ui:createButton("X")
+	closeBtn.onRelease = function()
+		node:remove()
+		Pointer:Show()
+	end
+
+	local topBar = ui_blocks:createBlock({
+		height = function() return closeBtn.Height end,
+		triptych = {
+	        dir = "horizontal",
+	        color = Color(0,0,0,0.5),
+			center = title,
+			right = closeBtn,
+	    },
+	    parentDidResize = function(node)
+	        closeBtn.Width = closeBtn.Height
+	    end,
+	})
+
+	local contentFrame = ui:createFrame()
+	contentFrame.parentDidResize = function(node)
+		node.Width = node.parent.Width - 8
+		node.Height = node.parent.Height - topBar.Height - 8
+	end
+
+	local rows = {}
+	local resourcesInfo = {
+		{ name = "Wheat", price = 3, rKey = "wheat" },
+		{ name = "Oak Log", price = 6, rKey = "oak_log" },
+	}
+
+	local imageFrame = ui:createFrame(Color(0,0,0,0.8))
+	local name = ui:createText("Name", Color.White)
+
+	local qty = ui:createText("You have 0 wheats", Color.White)
+	local sellPrice = ui:createText("0 💰", Color.White)
+
+	local selectedResource
+	local selectResource
+
+	local loadLine = function(index)
+		local info = resourcesInfo[index]
+		if not info then return end
+
+		local icon = ui:createShape(Shape(resourcesByKey[info.rKey].cachedShape), { spherized = true })
+		icon:setParent(node)
+		icon.Size = 92
+		icon.pivot.LocalRotation = resourcesByKey[info.rKey].icon.rotation
+
+		local node = ui_blocks:createBlock({
+			height = function() return 100 end,
+			triptych = {
+				color = Color.Grey,
+				left = ui_blocks:createLineContainer({
+					nodes = {
+						{ type = "gap" },
+						icon,
+						{ type = "gap" },
+						ui:createText(info.name)
+					}
+				}),
+				right = ui:createText(string.format("%d 💰 ", info.price))
+			}
+		})
+		node.onRelease = function()
+			selectResource(info)
+		end
+
+		return node
+	end
+
+	local unloadLine = function(cell)
+		cell:remove()
+	end
+
+	local config = {
+		cellPadding = 4,
+		loadCell = loadLine,
+		unloadCell = unloadLine,
+		uikit = uikit or require("uikit"),
+	}
+
+	local scrollArea = ui:createScrollArea(Color(0,0,0,0.5), config)
+	scrollArea.parentDidResize = function()
+		scrollArea.Width = scrollArea.parent.Width
+		scrollArea.Height = scrollArea.parent.Height
+	end
+
+	local sell1Btn = ui:createButton("x1")
+	sell1Btn.onRelease = function()
+		LocalEvent:Send("InvRemoveGlobal", {
+			keys = { "hotbar", "mainInventory" }, rKey = selectedResource.rKey, amount = 1, callback = function(success)
+				if not success then return print("Not enough resources") end	
+				print("Sold x1", selectedResource.rKey)
+				money:add(selectedResource.price)
+				selectResource(selectedResource)
+			end
+		})
+	end
+	local sell5Btn = ui:createButton("x5")
+	sell5Btn.onRelease = function()
+		LocalEvent:Send("InvRemoveGlobal", {
+			keys = { "hotbar", "mainInventory" }, rKey = selectedResource.rKey, amount = 5, callback = function(success)
+				if not success then return print("Not enough resources") end	
+				print("Sold x5", selectedResource.rKey)
+				money:add(selectedResource.price * 5)
+				selectResource(selectedResource)
+			end
+		})
+	end
+
+	local sellAllBtn = ui:createButton("All")
+	sellAllBtn.onRelease = function()
+		LocalEvent:Send("InvGetQuantity", { rKey = selectedResource.rKey, keys = { "hotbar", "mainInventory" },
+			callback = function(quantities)
+				local amount = quantities.total
+				if amount <= 0 then
+					print("Not enough resources")
+					return
+				end
+				LocalEvent:Send("InvRemoveGlobal", {
+					keys = { "hotbar", "mainInventory" }, rKey = selectedResource.rKey, amount = amount, callback = function(success)
+						if not success then return end
+						money:add(selectedResource.price * amount)
+						print(string.format("Sold x%d %s", amount, selectedResource.rKey))
+						selectResource(selectedResource)
+					end
+				})
+			end
+		})
+	end
+
+	local topContainer = ui_blocks:createLineContainer({
+		dir = "vertical",
+		nodes = {
+			imageFrame,
+			{ type = "gap" },
+			name
+		}
+	})
+
+	local bottomContainer = ui_blocks:createLineContainer({
+		dir = "vertical",
+		nodes = {
+			qty, { type = "gap" }, { type = "gap" },
+			sellPrice, { type = "gap" }, { type = "gap" },
+			ui_blocks:createBlock({
+				width = function(node) return node.parent.Width end,
+				height = function(node) return sell1Btn.Height end,
+				triptych = {
+					left = ui:createText("Sell", Color.White, "big"),
+					right = ui_blocks:createLineContainer({
+						dir = "horizontal",
+						nodes = {
+							sell1Btn, sell5Btn, sellAllBtn
+						}
+					})
+				}
+			}),
+		},
+	})
+
+	local buyFrame = ui_blocks:createBlock({
+		pos = function() return { 4, 0 } end,
+		triptych = {
+			color = Color(0,0,0,0.5),
+			dir = "vertical",
+			top = topContainer,
+			bottom = bottomContainer
+		},
+		parentDidResize = function(node)
+			imageFrame.Size = node.Width * 0.75
+		end
+	})
+
+	selectResource = function(info)
+		selectedResource = info
+		name.Text = info.name
+		name.pos.X = name.parent.Width * 0.5 - name.Width * 0.5
+		sellPrice.Text = string.format("%d 💰", info.price)
+		if imageFrame.imageIcon then imageFrame.imageIcon:remove() end
+		imageFrame.imageIcon = ui:createShape(Shape(resourcesByKey[info.rKey].cachedShape), { spherized = true })
+		imageFrame.imageIcon:setParent(imageFrame)
+		imageFrame.imageIcon.pos = resourcesByKey[info.rKey].icon.pos
+		imageFrame.imageIcon.Size = imageFrame.Width
+		imageFrame.imageIcon.pivot.LocalRotation = resourcesByKey[info.rKey].icon.rotation
+		LocalEvent:Send("InvGetQuantity", { rKey = info.rKey, keys = { "hotbar", "mainInventory" },
+			callback = function(quantities)
+				qty.Text = string.format("You have x%d %s%s", quantities.total, info.name, quantities.total > 1 and "s" or "")
+				qty.pos.X = qty.parent.Width * 0.5 - qty.Width * 0.5
+			end
+		})
+	end
+
+	local content = ui_blocks:createBlock({
+		width = function(node) return node.parent and node.parent.Width - 8 or 0 end,
+		pos = function() return { 4, 4 } end,
+		columns = {
+			scrollArea,
+			buyFrame
+		}
+	})
+	content:setParent(contentFrame)
+
+	node = ui_blocks:createBlock({
+		width = function() return math.min(Screen.Width * 0.9,700) end,
+		height = function() return math.min(Screen.Height * 0.8,500) end,
+		pos = function(node)
+			return {
+				Screen.Width * 0.5 - node.Width * 0.5,
+				Screen.Height * 0.5 - node.Height * 0.5
+			}
+		end,
+		triptych = {
+	        dir = "vertical",
+	        color = Color(0,0,0,0.5),
+			top = topBar,
+			bottom = contentFrame
+	    },
+	})
+
+	selectResource(resourcesInfo[1])
+
+	return node
+end
+
+createFurnitureUI = function()
+	local ui = require("uikit")
+
+	local node
+
+	local title = ui:createText("Furniture", Color.White, "small")
+	local closeBtn = ui:createButton("X")
+	closeBtn.onRelease = function()
+		node:remove()
+		Pointer:Show()
+	end
+
+	local topBar = ui_blocks:createBlock({
+		height = function() return closeBtn.Height end,
+		triptych = {
+	        dir = "horizontal",
+	        color = Color(0,0,0,0.5),
+			center = title,
+			right = closeBtn,
+	    },
+	    parentDidResize = function(node)
+	        closeBtn.Width = closeBtn.Height
+	    end,
+	})
+
+	local contentFrame = ui:createFrame()
+	contentFrame.parentDidResize = function(node)
+		node.Width = node.parent.Width - 8
+		node.Height = node.parent.Height - topBar.Height - 8
+	end
+
+	local rows = {}
+	local resourcesInfo = {
+		{ name = "Wheat seed", price = 20, rKey = "wheat_seed" },
+		{ name = "Sapling", price = 40, rKey = "oak_sapling" },
+	}
+
+	local imageFrame = ui:createFrame(Color(0,0,0,0.8))
+	local name = ui:createText("Name", Color.White)
+
+	local buyPrice = ui:createText("0 💰", Color.White)
+
+	local selectedResource
+	local selectResource
+
+	local loading = true
+	local loadLine = function(index)
+		local info = resourcesInfo[index]
+		if not info then return end
+
+		local icon = ui:createShape(Shape(resourcesByKey[info.rKey].cachedShape, { includeChildren = true }), { spherized = true })
+		icon:setParent(node)
+		icon.Size = 92
+		icon.pivot.LocalRotation = resourcesByKey[info.rKey].icon.rotation
+
+		local node = ui_blocks:createBlock({
+			height = function() return 100 end,
+			triptych = {
+				color = Color.Grey,
+				left = ui_blocks:createLineContainer({
+					nodes = {
+						{ type = "gap" },
+						icon,
+						{ type = "gap" },
+						ui:createText(info.name)
+					}
+				}),
+				right = ui:createText(string.format("%d 💰 ", info.price))
+			}
+		})
+		node.onRelease = function()
+			selectResource(info)
+		end
+
+		return node
+	end
+
+	local unloadLine = function(cell)
+		cell:remove()
+	end
+
+	local config = {
+		cellPadding = 4,
+		loadCell = loadLine,
+		unloadCell = unloadLine,
+		uikit = uikit or require("uikit"),
+	}
+
+	local scrollArea = ui:createScrollArea(Color(0,0,0,0.5), config)
+	scrollArea.parentDidResize = function()
+		scrollArea.Width = scrollArea.parent.Width
+		scrollArea.Height = scrollArea.parent.Height
+	end
+
+	local sell1Btn = ui:createButton("x1")
+	sell1Btn.onRelease = function()
+		if money.amount < selectedResource.price then return end
+		LocalEvent:Send("InvAddGlobal", {
+			keys = { "hotbar", "mainInventory" }, rKey = selectedResource.rKey, amount = 1, callback = function(success)
+				if not success then return end
+				money:remove(selectedResource.price)
+				print(string.format("Bought x1 %s", selectedResource.rKey))
+				selectResource(selectedResource)
+			end
+		})
+	end
+	local sell5Btn = ui:createButton("x5")
+	sell5Btn.onRelease = function()
+		if money.amount < selectedResource.price * 5 then return end
+		LocalEvent:Send("InvAddGlobal", {
+			keys = { "hotbar", "mainInventory" }, rKey = selectedResource.rKey, amount = 5, callback = function(success)
+				if not success then return end
+				money:remove(selectedResource.price * 5)
+				print(string.format("Bought x5 %s", selectedResource.rKey))
+				selectResource(selectedResource)
+			end
+		})
+	end
+
+	local topContainer = ui_blocks:createLineContainer({
+		dir = "vertical",
+		nodes = {
+			imageFrame,
+			{ type = "gap" },
+			name
+		}
+	})
+
+	local bottomContainer = ui_blocks:createLineContainer({
+		dir = "vertical",
+		nodes = {
+			buyPrice, { type = "gap" }, { type = "gap" },
+			ui_blocks:createBlock({
+				width = function(node) return node.parent.Width end,
+				height = function(node) return sell1Btn.Height end,
+				triptych = {
+					left = ui:createText("Buy", Color.White, "big"),
+					right = ui_blocks:createLineContainer({
+						dir = "horizontal",
+						nodes = {
+							sell1Btn, sell5Btn
+						}
+					})
+				}
+			}),
+		},
+	})
+
+	local buyFrame = ui_blocks:createBlock({
+		pos = function() return { 4, 4 } end,
+		triptych = {
+			color = Color(0,0,0,0.5),
+			dir = "vertical",
+			top = topContainer,
+			bottom = bottomContainer
+		},
+		parentDidResize = function(node)
+			imageFrame.Size = node.Width * 0.75
+		end
+	})
+
+	selectResource = function(info)
+		selectedResource = info
+		name.Text = info.name
+		name.pos.X = name.parent.Width * 0.5 - name.Width * 0.5
+		buyPrice.Text = string.format("%d 💰", info.price)
+		if imageFrame.imageIcon then imageFrame.imageIcon:remove() end
+		imageFrame.imageIcon = ui:createShape(Shape(resourcesByKey[info.rKey].cachedShape, { includeChildren = true }), { spherized = true })
+		imageFrame.imageIcon:setParent(imageFrame)
+		imageFrame.imageIcon.pos = resourcesByKey[info.rKey].icon.pos
+		imageFrame.imageIcon.Size = imageFrame.Width
+		imageFrame.imageIcon.pivot.LocalRotation = resourcesByKey[info.rKey].icon.rotation
+	end
+
+	local content = ui_blocks:createBlock({
+		width = function(node) return node.parent and node.parent.Width - 4 or 0 end,
+		pos = function() return { 4, 4 } end,
+		columns = {
+			scrollArea,
+			buyFrame
+		}
+	})
+	content:setParent(contentFrame)
+
+	node = ui_blocks:createBlock({
+		width = function() return math.min(Screen.Width * 0.9,700) end,
+		height = function() return math.min(Screen.Height * 0.8,500) end,
+		pos = function(node)
+			return {
+				Screen.Width * 0.5 - node.Width * 0.5,
+				Screen.Height * 0.5 - node.Height * 0.5
+			}
+		end,
+		triptych = {
+	        dir = "vertical",
+	        color = Color(0,0,0,0.5),
+			top = topBar,
+			bottom = contentFrame
+	    },
+	})
+
+	return node
+end
+
+texturedBlocks = {
+	list = {},
+	blocksCache = {} --TODO: save obj and duplicate them
+}
+texturedBlocks.placeBlock = function(self, rKey, pos)
+	local obj = Object()
+	local facesConfig = {
+		{
+			offset = Number3(1,0,0),
+			rotation = Number3(0,0,0),
+			anchor = { 1, 1 }
+		},
+		{
+			offset = Number3(0,0,0),
+			rotation = Number3(0,math.pi * 0.5,0),
+			anchor = { 1, 1 }
+		},
+		{
+			offset = Number3(1,0,1),
+			rotation = Number3(0,-math.pi * 0.5,0),
+			anchor = { 1, 1 }
+		},
+		{
+			offset = Number3(0,0,1),
+			rotation = Number3(0,math.pi,0),
+			anchor = { 1, 1 }
+		},
+		{
+			offset = Number3(0,0,0),
+			rotation = Number3(math.pi * 0.5,0,0),
+			anchor = { 0, 0 }
+		},
+		{
+			offset = Number3(0,-1,0),
+			rotation = Number3(-math.pi * 0.5,0,0),
+			anchor = { 0, 1 }
+		}
+	}
+	for _,faceConfig in ipairs(facesConfig) do
+		local qleft = Quad()
+		qleft.Image = cachedTextures[rKey]
+		qleft:SetParent(obj)
+		qleft.LocalPosition = faceConfig.offset
+		qleft.Rotation = faceConfig.rotation
+		qleft.IsDoubleSided = false
+		qleft.Anchor = faceConfig.anchor
+		qleft.Shadow = true
+	end
+	obj.CollisionBox = Box(Number3(0,-1,0), Number3(1,0,1))
+	obj:SetParent(World)
+	obj.Scale = map.Scale
+	obj.Physics = PhysicsMode.Disabled
+	obj.Position = pos * map.Scale.X
+	obj.rKey = rKey
+	self.list[pos.Z] = self.list[pos.Z] or {}
+	self.list[pos.Z][pos.Y] = self.list[pos.Z][pos.Y] or {}
+	self.list[pos.Z][pos.Y][pos.X] = obj
+
+	obj.remove = function(obj)
+		self.list[pos.Z][pos.Y][pos.X] = nil
+		obj:RemoveFromParent()
+	end
+
+	map:AddBlock(Color(0,0,0,0), pos)
+
+	return obj
 end
