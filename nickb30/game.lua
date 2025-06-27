@@ -23,6 +23,18 @@ local LANE_WIDTH = 30
 local BUILDING_FAR = 700
 local DIFFICULTY_INCREASE_RATE = 0.02  -- How fast difficulty increases per second
 local MAX_DIFFICULTY_MULTIPLIER = 2.5  -- Maximum difficulty multiplier
+local SWIPE_THRESHOLD = 10  -- Minimum distance for swipe detection
+local GROUND_OFFSET = 0.1  -- Height offset for obstacles above ground
+local WALL_SPACING = 50  -- Distance between walls in a train
+local SPAWN_DISTANCE = 200  -- Distance ahead of current progress to spawn obstacles
+local MAX_SPAWN_DISTANCE = 400  -- Maximum distance to spawn obstacles ahead
+local SPAWN_SPACING = 50  -- Spacing between spawn attempts
+local MAX_SPAWNS_PER_FRAME = 10  -- Maximum obstacles to spawn per frame
+local CLEANUP_DISTANCE = 200  -- Distance behind player to clean up obstacles
+local STAIRS_BOOST_MULTIPLIER = 1.5  -- Multiplier for stairs boost
+local GROUND_MOTION_MULTIPLIER = 0.015  -- Multiplier for ground motion speed
+local LANE_MOVEMENT_SPEED = 1000  -- Speed multiplier for lane movement
+local LANE_MOVEMENT_THRESHOLD = 0.01  -- Threshold for lane movement completion
 local STATES = {
     LOADING = 1,
     MENU = 2,
@@ -40,11 +52,6 @@ local COLLISION_GROUPS = {
     PLAYER = CollisionGroups(5),
 }
 
--- SEGMENT SYSTEM
-local SEGMENT_LENGTH = 120  -- How long each segment is (increased from 80)
-local SEGMENTS_AHEAD = 3   -- How many segments to keep ahead of player
-local MAX_Z_POSITION = 500 -- Maximum Z position before resetting (increased from 400)
-
 -- Lane-based obstacle spawning system
 local laneTrackers = {
     left = { lastSpawnZ = 0, minDistance = 100, wallTrainCount = 0, stairsSpawned = false },   -- Left lane (-1)
@@ -60,15 +67,6 @@ local obstacleTypes = {
     --{ type = "stairs", probability = 0.15, minDistance = 120 }
 }
 
--- Obstacle combinations for multi-lane patterns
-local combinationPatterns = {
-    { lanes = {-1, 1}, probability = 0.3, minDistance = 100 },  -- Side lanes
-    { lanes = {0}, probability = 0.4, minDistance = 80 },       -- Center lane
-    { lanes = {-1, 0, 1}, probability = 0.1, minDistance = 150 }, -- All lanes
-    { lanes = {-1, 0}, probability = 0.1, minDistance = 90 },   -- Left + center
-    { lanes = {0, 1}, probability = 0.1, minDistance = 90 }     -- Center + right
-}
-
 -- obstacle parts
 local wallPart
 local flagPart
@@ -77,7 +75,6 @@ local stairsPart
 
 -- Simple segment manager
 local segments = {}           -- Active segments
-local nextSegmentZ = 100      -- Z position for next segment (increased from 50)
 
 -- GAME STATE VARIABLES
 local downPos
@@ -108,8 +105,6 @@ local highScoreText = nil
 local highScoreValueText = nil
 local newHighScoreText = nil
 local newHighScorePanel = nil
-local coordinatesText = nil
-local targetLaneText = nil
 local restartText = nil
 local currentState = STATES.LOADING
 local assetsLoaded = 0
@@ -247,6 +242,121 @@ local function updateHighScoreDisplay(newHighScore)
     end
 end
 
+-- ============================================================================
+-- GAME STATE MANAGEMENT FUNCTIONS
+-- ============================================================================
+
+function dropPlayer()
+    Player.Position:Set(0, 40, 0)
+    Player.Rotation:Set(0, 0, 0)
+    Player.Velocity:Set(0, 0, 0)
+    
+    -- Clear segments using the new system
+    clearSegments()
+    
+    -- Reset game state
+    targetLane = 0
+    currentLane = 0
+    isGameOver = false
+    isSlowDownActive = false
+    slowDownTimer = 0
+    gameSpeed = NORMAL_GAME_SPEED
+    gameProgress = 0  -- Reset game progress
+    difficultyMultiplier = 1.0  -- Reset difficulty
+    gameTime = 0  -- Reset game time
+    isCrouching = false  -- Reset crouch state
+    crouchTimer = 0
+    wantsToCrouch = false  -- Reset air crouch state
+    Player.Scale.Y = NORMAL_SCALE  -- Reset player scale
+    Player.Animations.Walk.Speed = ANIMATION_SPEED
+    Player.Animations.Walk:Stop()
+    Player.Motion.Y = 0
+    score = 0
+    currentState = STATES.READY  -- Start in READY state instead of RUNNING
+
+    -- Update UI displays
+    updateScoreDisplay(score)
+    
+    -- Hide new high score text
+    if newHighScoreText then
+        newHighScoreText.Text = ""
+    end
+    if newHighScorePanel then
+        newHighScorePanel.Color = Color(0, 0, 0, 0)  -- Make transparent
+    end
+    
+    -- Hide restart text and show start instruction
+    if restartText then
+        restartText.Text = "Press W or swipe to start"
+        restartText.parentDidResize()
+    end
+end
+
+function gameOver()
+    leaderboard:set({score = score, callback = function() 
+        loadHighScore()
+    end})
+    isGameOver = true
+    print("Game Over")
+    currentState = STATES.GAME_OVER
+    Player.Animations.Walk:Stop()
+    clearSegments()
+    
+    -- Check if this is a new high score
+    local currentHighScore = tonumber(highScoreValueText.Text) or 0
+    if score > currentHighScore then
+        if newHighScoreText and newHighScorePanel then
+            newHighScoreText.Text = "NEW HIGH SCORE: " .. string.format("%.0f", score)
+            newHighScoreText.parentDidResize()
+            newHighScorePanel.Color = UI_COLORS.background
+        end
+    end
+    
+    -- Show restart instruction
+    if restartText then
+        restartText.Text = "Tap to restart"
+        restartText.parentDidResize()
+    end
+end
+
+function restartGame()
+    print("Restarting game...")
+    currentState = STATES.RUNNING
+    isGameOver = false
+    
+    -- Hide restart instruction
+    if restartText then
+        restartText.Text = ""
+    end
+    
+    -- Call dropPlayer to reset everything
+    dropPlayer()
+end
+
+function startGame()
+    print("Starting game...")
+    currentState = STATES.RUNNING
+    
+    -- Start player animation
+    Player.Animations.Walk:Play()
+    
+    -- Start motion on all existing obstacles
+    for _, segment in ipairs(segments) do
+        for _, obstacle in ipairs(segment.obstacles) do
+            obstacle.Motion.Z = -gameSpeed
+        end
+    end
+    
+    -- Hide start instruction
+    if restartText then
+        restartText.Text = ""
+    end
+end
+
+-- ============================================================================
+-- PLAYER MOVEMENT AND CONTROLS
+-- ============================================================================
+
 function startCrouch()
     if not isCrouching then
         if Player.IsOnGround then
@@ -354,7 +464,6 @@ end
 
 -- Called when Pointer is "shown" (Pointer.IsHidden == false), which is the case by default.
 Pointer.Drag = function(pe)
-    print("Pointer.Drag called, currentState: " .. currentState)
     if currentState == STATES.GAME_OVER then
         restartGame()
         return
@@ -381,23 +490,21 @@ Pointer.Drag = function(pe)
 
     if swipeTriggered == false then
         -- Swipe Right
-        if Xdiff > 50 and currentLane <= 0 then
+        if Xdiff > SWIPE_THRESHOLD and currentLane <= 0 then
             swipeTriggered = true
-            print("Swipe right")
             targetLane += 1
             isMoving = true
-        elseif Xdiff < -50 and currentLane >= 0 then
+        elseif Xdiff < -SWIPE_THRESHOLD and currentLane >= 0 then
             swipeTriggered = true
-            print("Swipe left")
             targetLane -= 1
             isMoving = true
-        elseif Ydiff > 50 then
+        elseif Ydiff > SWIPE_THRESHOLD then
             swipeTriggered = true
             if Player.IsOnGround then
                 cancelCrouch()  -- Cancel crouch when jumping
                 Player.Velocity.Y = JUMP_STRENGTH
             end
-        elseif Ydiff < -50 then
+        elseif Ydiff < -SWIPE_THRESHOLD then
             swipeTriggered = true
             if not Player.IsOnGround then
                 Player.Velocity.Y = -JUMP_STRENGTH  -- Fall faster
@@ -522,8 +629,8 @@ Client.OnStart = function()
             -- set collision box and groups
             local box = Box()
             box:Fit(wrapper, { recurse = true, localBox = true})
-            box.Max -= Number3(0, 4, 0)
-            box.Max += Number3(5, 0, 0)
+            box.Max += Number3(5, -4, 0)
+            box.Min -= Number3(5, 0, 0)
             wrapper.CollisionBox = box
             wrapper.CollisionGroups = COLLISION_GROUPS.COLLIDERS + COLLISION_GROUPS.MOTION
             wrapper.CollidesWithGroups = COLLISION_GROUPS.PLAYER
@@ -611,7 +718,7 @@ Client.OnStart = function()
         end
     end)
 
-    -- load stairs assest
+    -- load stairs asset
     HTTP:Get("https://files.blip.game/gltf/kenney/stairs.glb", function(response)
         if response.StatusCode == 200 then
             local req = Object:Load(response.Body, function(o)
@@ -624,6 +731,11 @@ Client.OnStart = function()
             end)
         else
             print("Failed to load stairs asset, status: " .. response.StatusCode)
+            -- Continue without stairs if loading fails
+            assetsLoaded = assetsLoaded + 1
+            if assetsLoaded == totalAssets then
+                currentState = STATES.MENU
+            end
         end
     end)
 
@@ -684,18 +796,15 @@ Client.OnStart = function()
         -- ignore collisions with the ground
         
         if other.Physics == PhysicsMode.Trigger or other.Physics == PhysicsMode.Static then
-            --print("other rotation: " .. other.Rotation.X .. ", " .. other.Rotation.Y .. ", " .. other.Rotation.Z)
             if other.Parent ~= nil then
                 -- Check if this is a stairs trigger
                 local parent = other.Parent
                 if obstaclesByRef[parent] == "stairs" then
-                    --print("Stairs boost triggered!")
                     -- Give the player a boost up and forward
-                    Player.Motion.Y = gameSpeed * 1.5  -- Upward boost
+                    Player.Motion.Y = gameSpeed * STAIRS_BOOST_MULTIPLIER  -- Upward boost
                     return
                 end
                 other = parent
-                print("other rotation: " .. other.Rotation.X .. ", " .. other.Rotation.Y .. ", " .. other.Rotation.Z)
             end
         end
 
@@ -704,9 +813,6 @@ Client.OnStart = function()
         end
         
         local obstacleType = obstaclesByRef[other]
-        --print("Collision with " .. obstacleType)
-        -- print normal vector
-        --print("Normal: " .. normal.X .. ", " .. normal.Y .. ", " .. normal.Z)
         
         -- For all obstacles, use the original logic
         if isSlowDownActive and normal.Y == 0 or normal.Z < 0 then
@@ -728,12 +834,10 @@ Client.OnStart = function()
 
     Player.OnCollisionEnd = function(self, other, normal)
         if other.Physics == PhysicsMode.Trigger or other.Physics == PhysicsMode.Static then
-            --print("other rotation: " .. other.Rotation.X .. ", " .. other.Rotation.Y .. ", " .. other.Rotation.Z)
             if other.Parent ~= nil then
                 -- Check if this is a stairs trigger
                 local parent = other.Parent
                 if obstaclesByRef[parent] == "stairs" then
-                    --print("Stairs boost ended!")
                     Player.Motion.Y = 0
                     return
                 end
@@ -743,181 +847,110 @@ Client.OnStart = function()
     end
 end
 
-function dropPlayer()
-    Player.Position:Set(0, 40, 0)
-    Player.Rotation:Set(0, 0, 0)
-    Player.Velocity:Set(0, 0, 0)
-    
-    -- Clear segments using the new system
-    clearSegments()
-    
-    -- Reset game state
-    targetLane = 0
-    currentLane = 0
-    isGameOver = false
-    isSlowDownActive = false
-    slowDownTimer = 0
-    gameSpeed = NORMAL_GAME_SPEED
-    gameProgress = 0  -- Reset game progress
-    difficultyMultiplier = 1.0  -- Reset difficulty
-    gameTime = 0  -- Reset game time
-    isCrouching = false  -- Reset crouch state
-    crouchTimer = 0
-    wantsToCrouch = false  -- Reset air crouch state
-    Player.Scale.Y = NORMAL_SCALE  -- Reset player scale
-    Player.Animations.Walk.Speed = ANIMATION_SPEED
-    Player.Animations.Walk:Stop()
-    Player.Motion.Y = 0
-    score = 0
-    currentState = STATES.READY  -- Start in READY state instead of RUNNING
-
-    -- Update UI displays
-    updateScoreDisplay(score)
-    
-    -- Hide new high score text
-    if newHighScoreText then
-        newHighScoreText.Text = ""
-    end
-    if newHighScorePanel then
-        newHighScorePanel.Color = Color(0, 0, 0, 0)  -- Make transparent
+function updateSegments(gameProgress)
+    -- Don't spawn obstacles if assets aren't loaded yet
+    if logPart == nil or wallPart == nil or flagPart == nil or stairsPart == nil then
+        return
     end
     
-    -- Hide restart text and show start instruction
-    if restartText then
-        restartText.Text = "Press W or swipe to start"
-        restartText.parentDidResize()
-    end
-end
-
-function gameOver()
-    leaderboard:set({score = score, callback = function() 
-        loadHighScore()
-    end})
-    isGameOver = true
-    print("Game Over")
-    currentState = STATES.GAME_OVER
-    Player.Animations.Walk:Stop()
-    clearSegments()
-    
-    -- Check if this is a new high score
-    local currentHighScore = tonumber(highScoreValueText.Text) or 0
-    if score > currentHighScore then
-        if newHighScoreText and newHighScorePanel then
-            newHighScoreText.Text = "NEW HIGH SCORE: " .. string.format("%.0f", score)
-            newHighScoreText.parentDidResize()
-            newHighScorePanel.Color = UI_COLORS.background
+    -- Reset lane trackers if lastSpawnZ is too far behind the current progress
+    for _, tracker in pairs(laneTrackers) do
+        if gameProgress - tracker.lastSpawnZ > MAX_SPAWN_DISTANCE then
+            tracker.lastSpawnZ = gameProgress - MAX_SPAWN_DISTANCE + tracker.minDistance
         end
     end
     
-    -- Show restart instruction
-    if restartText then
-        restartText.Text = "Tap to restart"
-        restartText.parentDidResize()
-    end
-end
-
-function restartGame()
-    print("Restarting game...")
-    currentState = STATES.RUNNING
-    isGameOver = false
+    -- Check if we need to spawn new obstacles
+    local currentSpawnZ = gameProgress + SPAWN_DISTANCE
+    local spawnCount = 0  -- Limit spawning to prevent memory issues
     
-    -- Hide restart instruction
-    if restartText then
-        restartText.Text = ""
-    end
-    
-    -- Call dropPlayer to reset everything
-    dropPlayer()
-end
-
-function startGame()
-    print("Starting game...")
-    currentState = STATES.RUNNING
-    
-    -- Start player animation
-    Player.Animations.Walk:Play()
-    
-    -- Start motion on all existing obstacles
-    for _, segment in ipairs(segments) do
-        for _, obstacle in ipairs(segment.obstacles) do
-            obstacle.Motion.Z = -gameSpeed
-        end
-    end
-    
-    -- Hide start instruction
-    if restartText then
-        restartText.Text = ""
-    else
-    end
-end
-
-Client.Tick = function(dt)
-    if currentState == STATES.LOADING then
-        return
-    end
-
-    if currentState == STATES.MENU then
-        -- In menu state, just spawn initial segments
-        updateSegments(gameProgress)
-        return
-    end
-
-    if currentState == STATES.READY then
-        -- Update UI in ready state
-        updateScoreDisplay(score)
+    while currentSpawnZ < gameProgress + MAX_SPAWN_DISTANCE and spawnCount < MAX_SPAWNS_PER_FRAME do
+        local newObstacles = spawnObstaclesAtPosition(currentSpawnZ)
         
-        -- Spawn segments but don't update score or move obstacles
-        updateSegments(gameProgress)
-        return
+        if newObstacles and #newObstacles > 0 then
+            -- Create a segment entry for tracking
+            local segment = {
+                zPosition = currentSpawnZ,
+                obstacles = newObstacles
+            }
+            table.insert(segments, segment)
+            spawnCount = spawnCount + #newObstacles
+        end
+        
+        currentSpawnZ = currentSpawnZ + SPAWN_SPACING  -- Increased spacing to reduce spawn frequency
     end
 
-    if isGameOver then return end
-    
-    -- Update game progress based on time and game speed
-    gameProgress = gameProgress + (gameSpeed * dt)
-    
-    -- Update difficulty over time (only when game is running)
-    if currentState == STATES.RUNNING then
-        gameTime = gameTime + dt
-        difficultyMultiplier = math.min(MAX_DIFFICULTY_MULTIPLIER, 1.0 + (DIFFICULTY_INCREASE_RATE * gameTime))
-        gameSpeed = NORMAL_GAME_SPEED * difficultyMultiplier
-    end
-    
-    updateScore(dt)
-    updateScoreDisplay(score)
-    updateCrouch(dt)  -- Update crouch timer
-    --coordinatesText.Text = string.format("Coordinates: (%.1f, %.1f, %.1f)", Player.Position.X, Player.Position.Y, Player.Position.Z)
-    --targetLaneText.Text = "Target Lane: " .. targetLane
-
-    if isSlowDownActive then
-        slowDownTimer -= dt
-        Player.Animations.Walk.Speed = ANIMATION_SPEED * SLOW_DOWN_MULTIPLIER
-        gameSpeed = NORMAL_GAME_SPEED * SLOW_DOWN_MULTIPLIER
-        updateObstacleSpeed(gameSpeed)
-        if slowDownTimer <= 0 then
-            isSlowDownActive = false
-            gameSpeed = NORMAL_GAME_SPEED * difficultyMultiplier  -- Use current difficulty multiplier
-            Player.Animations.Walk.Speed = ANIMATION_SPEED
-            updateObstacleSpeed(gameSpeed)
+    -- Remove old segments whose obstacles are all behind the player
+    for i = #segments, 1, -1 do
+        local segment = segments[i]
+        local allBehind = true
+        for _, obstacle in ipairs(segment.obstacles) do
+            if obstacle.Position.Z >= Player.Position.Z - 50 then
+                allBehind = false
+                break
+            end
+        end
+        if allBehind then
+            for _, obstacle in ipairs(segment.obstacles) do
+                if obstacle and obstacle.Parent then  -- Check if obstacle still exists
+                    World:RemoveChild(obstacle)
+                    obstaclesByRef[obstacle] = nil
+                end
+            end
+            table.remove(segments, i)
         end
     end
-
-    updateSegments(gameProgress)
-    groundImage.Offset.Y = groundImage.Offset.Y - dt * gameSpeed * 0.015
-    yellowLineLeft.Offset.Y = yellowLineLeft.Offset.Y - dt * gameSpeed * 0.015
-    yellowLineMiddle.Offset.Y = yellowLineMiddle.Offset.Y - dt * gameSpeed * 0.015
-    yellowLineRight.Offset.Y = yellowLineRight.Offset.Y - dt * gameSpeed * 0.015
-
-
-    if isMoving then
-        targetLane = math.max(-1, math.min(1, targetLane))
-        targetPosition = lanePositions[targetLane + 2]
-        Player.Velocity.X = (targetPosition.X - Player.Position.X) * 1000 * dt
-        if math.abs(targetPosition.X - Player.Position.X) < 0.01 then
-            currentLane = targetLane
-            isMoving = false
+    
+    -- Additional cleanup: remove any obstacles that are too far behind
+    for obstacle, _ in pairs(obstaclesByRef) do
+        if obstacle and obstacle.Parent and obstacle.Position.Z < Player.Position.Z - CLEANUP_DISTANCE then
+            World:RemoveChild(obstacle)
+            obstaclesByRef[obstacle] = nil
         end
     end
+end
+
+function wouldCreateImpossibleSegment(lane, obstacleType, zPosition)
+    -- If this isn't a wall, it won't create an impossible segment
+    if obstacleType ~= "wall" then
+        return false
+    end
+    
+    -- Check if there are wall trains in other lanes that would overlap with this position
+    local wallsInOtherLanes = 0
+    for checkLane = -1, 1 do
+        if checkLane ~= lane then
+            local tracker = getLaneTracker(checkLane)
+            if tracker and tracker.wallTrainCount > 0 then
+                -- This lane is in a wall train, check if it overlaps with our target position
+                -- Wall trains span multiple Z positions, so we need to check the range
+                local wallTrainStartZ = tracker.lastSpawnZ - ((tracker.wallTrainCount - 1) * WALL_SPACING)
+                local wallTrainEndZ = tracker.lastSpawnZ
+                
+                -- Check if our target position overlaps with this wall train
+                if zPosition >= wallTrainStartZ and zPosition <= wallTrainEndZ then
+                    wallsInOtherLanes = wallsInOtherLanes + 1
+                end
+            end
+        end
+    end
+    
+    -- Also check existing obstacles in the world for walls at this Z position
+    for obstacle, obstacleType in pairs(obstaclesByRef) do
+        if obstacleType == "wall" and obstacle.Parent then
+            local obstacleLane = math.round(obstacle.Position.X / LANE_WIDTH)
+            if obstacleLane ~= lane then
+                -- Check if this wall is at or near our target Z position
+                local distance = math.abs(obstacle.Position.Z - zPosition)
+                if distance <= WALL_SPACING then
+                    wallsInOtherLanes = wallsInOtherLanes + 1
+                end
+            end
+        end
+    end
+    
+    -- If there are already walls in both other lanes at this Z position, adding a wall here would block all lanes
+    return wallsInOtherLanes >= 2
 end
 
 function spawnObstaclesAtPosition(zPosition)
@@ -928,6 +961,11 @@ function spawnObstaclesAtPosition(zPosition)
         local tracker = getLaneTracker(lane)
         if tracker and canSpawnInLane(lane, zPosition) then
             local obstacleData = selectObstacleType()
+            
+            -- Check if spawning this obstacle would create an impossible segment
+            if wouldCreateImpossibleSegment(lane, obstacleData.type, zPosition) then
+                return
+            end
             
             -- If it's a wall, start a wall train
             if obstacleData.type == "wall" and obstacleData.trainLength then
@@ -945,9 +983,8 @@ function spawnObstaclesAtPosition(zPosition)
                     end
                     
                     -- Spawn all walls in the train at once with Z offsets
-                    local wallSpacing = 50  -- Distance between walls
                     for i = 1, trainLength do
-                        local wallZ = zPosition + (i * wallSpacing)
+                        local wallZ = zPosition + (i * WALL_SPACING)
                         local wallObstacle = spawnObstacle("wall", lane, wallZ)
                         if wallObstacle then
                             table.insert(spawnedObstacles, wallObstacle)
@@ -955,7 +992,7 @@ function spawnObstaclesAtPosition(zPosition)
                     end
                     
                     -- Update the lane tracker - mark that this wall train is complete
-                    tracker.lastSpawnZ = zPosition + ((trainLength - 1) * wallSpacing)
+                    tracker.lastSpawnZ = zPosition + ((trainLength - 1) * WALL_SPACING)
                     tracker.minDistance = obstacleData.minDistance
                     tracker.wallTrainCount = 0  -- Reset wall train count after spawning
             else
@@ -970,6 +1007,10 @@ function spawnObstaclesAtPosition(zPosition)
         end
     end
     return spawnedObstacles
+end
+
+function setObstaclePosition(obstacle, lane, zPosition)
+    obstacle.Position = Number3(lane * LANE_WIDTH, groundLevel + GROUND_OFFSET, zPosition)
 end
 
 function spawnObstacle(obstacleType, lane, zPosition)
@@ -988,19 +1029,16 @@ function spawnObstacle(obstacleType, lane, zPosition)
     
     if obstacleType == "log" then
         obstacle = logPart:Copy({ includeChildren = true })
-        obstacle.Position = Number3(lane * LANE_WIDTH, groundLevel + 0.1, zPosition)
     elseif obstacleType == "wall" then
         obstacle = wallPart:Copy({ includeChildren = true })
-        obstacle.Position = Number3(lane * LANE_WIDTH, groundLevel + 0.1, zPosition)
     elseif obstacleType == "flag" then
         obstacle = flagPart:Copy({ includeChildren = true })
-        obstacle.Position = Number3(lane * LANE_WIDTH, groundLevel + 0.1, zPosition)
     elseif obstacleType == "stairs" then
         obstacle = stairsPart:Copy({ includeChildren = true })
-        obstacle.Position = Number3(lane * LANE_WIDTH, groundLevel + 0.1, zPosition)
     end
     
     if obstacle then
+        setObstaclePosition(obstacle, lane, zPosition)
         obstacle.Mass = 1000
         if currentState == STATES.RUNNING then
             obstacle.Motion.Z = -gameSpeed
@@ -1067,21 +1105,6 @@ function selectObstacleType()
     return obstacleTypes[1]
 end
 
-function selectCombinationPattern()
-    local rand = math.random()
-    local cumulative = 0
-    
-    for _, pattern in ipairs(combinationPatterns) do
-        cumulative = cumulative + pattern.probability
-        if rand <= cumulative then
-            return pattern
-        end
-    end
-    
-    -- Fallback to center lane if something goes wrong
-    return combinationPatterns[2]
-end
-
 function updateObstacleSpeed(newSpeed)
     for _, segment in ipairs(segments) do
         for _, obstacle in ipairs(segment.obstacles) do
@@ -1098,7 +1121,6 @@ function clearSegments()
         end
     end
     segments = {}
-    nextSegmentZ = 100  -- Reset to starting position
     
     -- Reset lane trackers
     laneTrackers.left.lastSpawnZ = 0
@@ -1115,70 +1137,70 @@ function clearSegments()
     laneTrackers.right.stairsSpawned = false
 end
 
-function updateSegments(gameProgress)
-    -- Don't spawn obstacles if assets aren't loaded yet
-    if logPart == nil or wallPart == nil or flagPart == nil or stairsPart == nil then
+Client.Tick = function(dt)
+    if currentState == STATES.LOADING then
         return
     end
-    
-    -- Always keep obstacles spawning ahead of the current progress
-    local spawnDistance = 200  -- Distance ahead of current progress to spawn obstacles
-    local maxSpawnDistance = 400  -- Maximum distance to spawn obstacles ahead
-    
-    -- Reset lane trackers if lastSpawnZ is too far behind the current progress
-    for _, tracker in pairs(laneTrackers) do
-        if gameProgress - tracker.lastSpawnZ > maxSpawnDistance then
-            tracker.lastSpawnZ = gameProgress - maxSpawnDistance + tracker.minDistance
-        end
-    end
-    
-    -- Check if we need to spawn new obstacles
-    local currentSpawnZ = gameProgress + spawnDistance
-    local spawnCount = 0  -- Limit spawning to prevent memory issues
-    local maxSpawnsPerFrame = 10  -- Maximum obstacles to spawn per frame
-    
-    while currentSpawnZ < gameProgress + maxSpawnDistance and spawnCount < maxSpawnsPerFrame do
-        local newObstacles = spawnObstaclesAtPosition(currentSpawnZ)
-        
-        if #newObstacles > 0 then
-            -- Create a segment entry for tracking
-            local segment = {
-                zPosition = currentSpawnZ,
-                obstacles = newObstacles
-            }
-            table.insert(segments, segment)
-            spawnCount = spawnCount + #newObstacles
-        end
-        
-        currentSpawnZ = currentSpawnZ + 50  -- Increased spacing to reduce spawn frequency
+
+    if currentState == STATES.MENU then
+        -- In menu state, just spawn initial segments
+        updateSegments(gameProgress)
+        return
     end
 
-    -- Remove old segments whose obstacles are all behind the player
-    for i = #segments, 1, -1 do
-        local segment = segments[i]
-        local allBehind = true
-        for _, obstacle in ipairs(segment.obstacles) do
-            if obstacle.Position.Z >= Player.Position.Z - 50 then
-                allBehind = false
-                break
-            end
-        end
-        if allBehind then
-            for _, obstacle in ipairs(segment.obstacles) do
-                if obstacle and obstacle.Parent then  -- Check if obstacle still exists
-                    World:RemoveChild(obstacle)
-                    obstaclesByRef[obstacle] = nil
-                end
-            end
-            table.remove(segments, i)
-        end
+    if currentState == STATES.READY then
+        -- Update UI in ready state
+        updateScoreDisplay(score)
+        
+        -- Spawn segments but don't update score or move obstacles
+        updateSegments(gameProgress)
+        return
+    end
+
+    if isGameOver then return end
+    
+    -- Update game progress based on time and game speed
+    gameProgress = gameProgress + (gameSpeed * dt)
+    
+    -- Update difficulty over time (only when game is running)
+    if currentState == STATES.RUNNING then
+        gameTime = gameTime + dt
+        difficultyMultiplier = math.min(MAX_DIFFICULTY_MULTIPLIER, 1.0 + (DIFFICULTY_INCREASE_RATE * gameTime))
+        gameSpeed = NORMAL_GAME_SPEED * difficultyMultiplier
     end
     
-    -- Additional cleanup: remove any obstacles that are too far behind
-    for obstacle, _ in pairs(obstaclesByRef) do
-        if obstacle and obstacle.Parent and obstacle.Position.Z < Player.Position.Z - 200 then
-            World:RemoveChild(obstacle)
-            obstaclesByRef[obstacle] = nil
+    updateScore(dt)
+    updateScoreDisplay(score)
+    updateCrouch(dt)  -- Update crouch timer
+
+    if isSlowDownActive then
+        slowDownTimer -= dt
+        Player.Animations.Walk.Speed = ANIMATION_SPEED * SLOW_DOWN_MULTIPLIER
+        gameSpeed = NORMAL_GAME_SPEED * SLOW_DOWN_MULTIPLIER
+        updateObstacleSpeed(gameSpeed)
+        if slowDownTimer <= 0 then
+            isSlowDownActive = false
+            gameSpeed = NORMAL_GAME_SPEED * difficultyMultiplier  -- Use current difficulty multiplier
+            Player.Animations.Walk.Speed = ANIMATION_SPEED
+            Player.Animations.Walk:Play()  -- Ensure walk animation is playing
+            updateObstacleSpeed(gameSpeed)
+        end
+    end
+
+    updateSegments(gameProgress)
+    groundImage.Offset.Y = groundImage.Offset.Y - dt * gameSpeed * GROUND_MOTION_MULTIPLIER
+    yellowLineLeft.Offset.Y = yellowLineLeft.Offset.Y - dt * gameSpeed * GROUND_MOTION_MULTIPLIER
+    yellowLineMiddle.Offset.Y = yellowLineMiddle.Offset.Y - dt * gameSpeed * GROUND_MOTION_MULTIPLIER
+    yellowLineRight.Offset.Y = yellowLineRight.Offset.Y - dt * gameSpeed * GROUND_MOTION_MULTIPLIER
+
+
+    if isMoving then
+        targetLane = math.max(-1, math.min(1, targetLane))
+        targetPosition = lanePositions[targetLane + 2]
+        Player.Velocity.X = (targetPosition.X - Player.Position.X) * LANE_MOVEMENT_SPEED * dt
+        if math.abs(targetPosition.X - Player.Position.X) < LANE_MOVEMENT_THRESHOLD then
+            currentLane = targetLane
+            isMoving = false
         end
     end
 end
