@@ -4,6 +4,7 @@ Modules = {
     ease = "ease",
     ui = "uikit",
     webquad = "github.com/aduermael/modzh/webquad:7fbc37d",
+    niceleaderboard = "github.com/aduermael/modzh/niceleaderboard:d1d7c49",
 }
     
 Config.Items = {
@@ -22,7 +23,7 @@ local SLOW_DOWN_DURATION = 3.0
 local LANE_WIDTH = 30
 local BUILDING_FAR = 700
 local DIFFICULTY_INCREASE_RATE = 0.02  -- How fast difficulty increases per second
-local MAX_DIFFICULTY_MULTIPLIER = 2.5  -- Maximum difficulty multiplier
+local MAX_DIFFICULTY_MULTIPLIER = 3.0  -- Maximum difficulty multiplier
 local SWIPE_THRESHOLD = 10  -- Minimum distance for swipe detection
 local GROUND_OFFSET = 0.1  -- Height offset for obstacles above ground
 local WALL_SPACING = 50  -- Distance between walls in a train
@@ -105,10 +106,11 @@ local highScoreText = nil
 local highScoreValueText = nil
 local newHighScoreText = nil
 local newHighScorePanel = nil
-local restartText = nil
 local currentState = STATES.LOADING
 local assetsLoaded = 0
 local totalAssets = 4  -- log, wall, flag, stairs
+local startButton = nil
+local restartButton = nil
 
 -- UI STYLING CONSTANTS
 local UI_COLORS = {
@@ -198,14 +200,6 @@ local function createHighScorePanel()
     highScoreValueText:parentDidResize()
 end
 
-local function createRestartText()
-    restartText = createStyledText("", 20, UI_COLORS.primary, true)
-    restartText.parentDidResize = function()
-        restartText.pos = { Screen.Width / 2 - restartText.Width / 2, Screen.Height / 2 - restartText.Height / 2}
-    end
-    restartText:parentDidResize()
-end
-
 local function createNewHighScoreText()
     -- New High Score Background Panel
     newHighScorePanel = ui:createFrame()
@@ -284,12 +278,10 @@ function dropPlayer()
     if newHighScorePanel then
         newHighScorePanel.Color = Color(0, 0, 0, 0)  -- Make transparent
     end
-    
-    -- Hide restart text and show start instruction
-    if restartText then
-        restartText.Text = "Press W or swipe to start"
-        restartText.parentDidResize()
-    end
+
+    if leaderboardUI then leaderboardUI:show() end
+    if startButton then startButton:show() end
+    if restartButton then restartButton:hide() end
 end
 
 function gameOver()
@@ -302,6 +294,9 @@ function gameOver()
     Player.Animations.Walk:Stop()
     clearSegments()
     
+    -- Show leaderboard UI when game is over
+    leaderboardUI:show()
+    
     -- Check if this is a new high score
     local currentHighScore = tonumber(highScoreValueText.Text) or 0
     if score > currentHighScore then
@@ -312,22 +307,14 @@ function gameOver()
         end
     end
     
-    -- Show restart instruction
-    if restartText then
-        restartText.Text = "Tap to restart"
-        restartText.parentDidResize()
-    end
+    if restartButton then restartButton:show() end
+    if startButton then startButton:hide() end
 end
 
 function restartGame()
     print("Restarting game...")
     currentState = STATES.RUNNING
     isGameOver = false
-    
-    -- Hide restart instruction
-    if restartText then
-        restartText.Text = ""
-    end
     
     -- Call dropPlayer to reset everything
     dropPlayer()
@@ -336,6 +323,9 @@ end
 function startGame()
     print("Starting game...")
     currentState = STATES.RUNNING
+    
+    -- Hide leaderboard UI when game starts running
+    leaderboardUI:hide()
     
     -- Start player animation
     Player.Animations.Walk:Play()
@@ -347,10 +337,8 @@ function startGame()
         end
     end
     
-    -- Hide start instruction
-    if restartText then
-        restartText.Text = ""
-    end
+    if startButton then startButton:hide() end
+    if restartButton then restartButton:hide() end
 end
 
 -- ============================================================================
@@ -403,26 +391,7 @@ if Client.IsMobile then
     Client.Action1 = nil
 else
     Client.DirectionalPad = function(x, y)
-        if currentState == STATES.GAME_OVER then
-            restartGame()
-            return
-        end
-        
-        if currentState == STATES.MENU then
-            -- Transition from MENU to READY
-            currentState = STATES.READY
-            if restartText then
-                restartText.Text = "Press W or swipe to start"
-                restartText.parentDidResize()
-            end
-            return
-        end
-        
-        if currentState == STATES.READY then
-            startGame()
-            return
-        end
-        
+        -- Only allow movement/crouch/jump, not game start/restart
         if x == 1 then
             targetLane += 1
             isMoving = true
@@ -437,7 +406,7 @@ else
             end
         elseif y == -1 then
             if not Player.IsOnGround then
-                Player.Velocity.Y = -JUMP_STRENGTH  -- Fall faster
+                Player.Velocity.Y = -JUMP_STRENGTH * 1.8  -- Fall faster
                 startCrouch()  -- Mark that player wants to crouch when landing
             else
                 startCrouch()
@@ -464,26 +433,6 @@ end
 
 -- Called when Pointer is "shown" (Pointer.IsHidden == false), which is the case by default.
 Pointer.Drag = function(pe)
-    if currentState == STATES.GAME_OVER then
-        restartGame()
-        return
-    end
-    
-    if currentState == STATES.MENU then
-        -- Transition from MENU to READY
-        currentState = STATES.READY
-        if restartText then
-            restartText.Text = "Swipe or jump to start"
-            restartText.parentDidResize()
-        end
-        return
-    end
-
-    if currentState == STATES.READY then
-        startGame()
-        return
-    end
-    
     local pos = Number2(pe.X, pe.Y) * Screen.Size
     local Xdiff = pos.X - downPos.X
     local Ydiff = pos.Y - downPos.Y
@@ -507,14 +456,14 @@ Pointer.Drag = function(pe)
         elseif Ydiff < -SWIPE_THRESHOLD then
             swipeTriggered = true
             if not Player.IsOnGround then
-                Player.Velocity.Y = -JUMP_STRENGTH  -- Fall faster
+                Player.Velocity.Y = -JUMP_STRENGTH * 1.8  -- Fall faster
                 startCrouch()  -- Mark that player wants to crouch when landing
             else
                 startCrouch()
             end
         end
     end
- end
+end
 
 Client.OnWorldObjectLoad = function(o)
     if o.Name == "ground" then
@@ -545,6 +494,11 @@ Client.OnStart = function()
     -- Collision Groups
     -- Leaderboard
     leaderboard = Leaderboard("default")
+    leaderboardUI = niceleaderboard({})
+    leaderboardUI.Width = 200
+    leaderboardUI.Height = 300
+    leaderboardUI.Position = { Screen.Width / 2 - leaderboardUI.Width / 2, Screen.Height / 2 - leaderboardUI.Height / 2 }
+    leaderboardUI:reload()
 
     -- ground texture
     groundImage = webquad:create({
@@ -742,15 +696,14 @@ Client.OnStart = function()
     -- Create modern UI panels
     createScorePanel()
     createHighScorePanel()
-    createRestartText()
     createNewHighScoreText()
     
     -- Load high score with callback
     function loadHighScore()
         leaderboard:get({
             mode = "best",
-            friends = true,
-            limit = 10,
+            friends = false,
+            limit = 5,
             callback = function(scores, err)
                 if err == nil and scores then
                     local playerHighScore = 0
@@ -845,6 +798,30 @@ Client.OnStart = function()
             end
         end
     end
+
+    -- Create start button
+    startButton = ui:buttonPositive({content = "Start Game"})
+    startButton.Width = 200
+    startButton.Height = 50
+    startButton.pos = { Screen.Width / 2 - startButton.Width / 2, Screen.Height / 2 - leaderboardUI.Height - 20 }
+    startButton.onRelease = function()
+        leaderboardUI:hide()
+        startButton:hide()
+        startGame()
+    end
+    startButton:show()
+
+    -- Create restart button
+    restartButton = ui:buttonPositive({content = "Restart Game"})
+    restartButton.Width = 200
+    restartButton.Height = 50
+    restartButton.pos = { Screen.Width / 2 - restartButton.Width / 2, Screen.Height / 2 - leaderboardUI.Height - 20 }
+    restartButton.onRelease = function()
+        leaderboardUI:hide()
+        restartButton:hide()
+        restartGame()
+    end
+    restartButton:hide()
 end
 
 function updateSegments(gameProgress)
@@ -1164,6 +1141,7 @@ Client.Tick = function(dt)
     
     -- Update difficulty over time (only when game is running)
     if currentState == STATES.RUNNING then
+        leaderboardUI:hide()
         gameTime = gameTime + dt
         difficultyMultiplier = math.min(MAX_DIFFICULTY_MULTIPLIER, 1.0 + (DIFFICULTY_INCREASE_RATE * gameTime))
         gameSpeed = NORMAL_GAME_SPEED * difficultyMultiplier
@@ -1204,6 +1182,7 @@ Client.Tick = function(dt)
         end
     end
 end
+
 
 
 
