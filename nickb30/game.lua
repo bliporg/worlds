@@ -8,17 +8,22 @@ Modules = {
 }
     
 Config.Items = {
-    --grass = "s12.grass_cubzh",
+    "littlecreator.lc_tree_01",
+    "sansyozh.tree",
+    "cawa2un.tree01",
+    "cawa2un.tree04",
 }
 
 --Dev.DisplayColliders = true
+Config.ConstantAcceleration *= 2
 
 -- CONSTANTS
-local JUMP_STRENGTH = 100
+local GROUND_MOTION_MULTIPLIER = 1/64  -- NEEDS UPDATED VALUE
+local JUMP_STRENGTH = 150
 local SCORE_PER_SECOND = 100
 local ANIMATION_SPEED = 1.5
 local NORMAL_GAME_SPEED = 80
-local SLOW_DOWN_MULTIPLIER = 0.65
+local SLOW_DOWN_MULTIPLIER = 0.80
 local SLOW_DOWN_DURATION = 3.0
 local LANE_WIDTH = 30
 local BUILDING_FAR = 700
@@ -31,9 +36,8 @@ local SPAWN_DISTANCE = 200  -- Distance ahead of current progress to spawn obsta
 local MAX_SPAWN_DISTANCE = 400  -- Maximum distance to spawn obstacles ahead
 local SPAWN_SPACING = 50  -- Spacing between spawn attempts
 local MAX_SPAWNS_PER_FRAME = 10  -- Maximum obstacles to spawn per frame
-local CLEANUP_DISTANCE = 200  -- Distance behind player to clean up obstacles
+local CLEANUP_DISTANCE = 80 -- Distance behind player to clean up obstacles
 local STAIRS_BOOST_MULTIPLIER = 1.5  -- Multiplier for stairs boost
-local GROUND_MOTION_MULTIPLIER = 0.015  -- Multiplier for ground motion speed
 local LANE_MOVEMENT_SPEED = 1000  -- Speed multiplier for lane movement
 local LANE_MOVEMENT_THRESHOLD = 0.01  -- Threshold for lane movement completion
 local STATES = {
@@ -73,6 +77,7 @@ local wallPart
 local flagPart
 local logPart
 local stairsPart
+local cliffPart
 
 -- Simple segment manager
 local segments = {}           -- Active segments
@@ -101,154 +106,68 @@ local NORMAL_SCALE = 0.5  -- The player's normal scale
 local CROUCH_SCALE = 0.25  -- How much to scale down when crouching (50% of normal size)
 local wantsToCrouch = false  -- Track if player wants to crouch while in air
 local scoreText = nil
-local scoreValueText = nil
-local highScoreText = nil
-local highScoreValueText = nil
 local newHighScoreText = nil
 local newHighScorePanel = nil
 local currentState = STATES.LOADING
 local assetsLoaded = 0
-local totalAssets = 4  -- log, wall, flag, stairs
+local totalAssets = 5  -- log, wall, flag, stairs, cliff
 local startButton = nil
 local restartButton = nil
 
--- UI STYLING CONSTANTS
-local UI_COLORS = {
-    primary = Color(255, 255, 255),      -- White
-    secondary = Color(200, 200, 200),    -- Light gray
-    accent = Color(255, 215, 0),         -- Gold
-    background = Color(0, 0, 0, 0.8),   -- Semi-transparent black
-    border = Color(255, 255, 255, 0.4),  -- Semi-transparent white
-    shadow = Color(0, 0, 0, 0.3)        -- Shadow color
-}
 
-local UI_POSITIONS = {
-    scorePanel = {x = 20, y = 20},
-    highScorePanel = {x = 20, y = 80}
-}
-
--- UI Helper Functions
-local function createStyledText(text, fontSize, color, isBold)
-    local textObj = ui:createText(text)
-    textObj.FontSize = fontSize or 16
-    textObj.Color = color or UI_COLORS.primary
-    if isBold then
-        textObj.Font = "Bold"
-    end
-    return textObj
-end
-
-local function createScorePanel()
-    -- Score Panel Background
-    local scorePanel = ui:createFrame()
-    scorePanel.Size = {200, 65}
-    scorePanel.Color = UI_COLORS.background
-    scorePanel.BorderRadius = 12
-    scorePanel.BorderColor = UI_COLORS.border
-    scorePanel.BorderWidth = 2
-    
-    -- Score Label
-    scoreText = createStyledText("SCORE", 12, UI_COLORS.secondary, true)
+local function createTopRightScore()
+    -- Create score text in top-right corner
+    scoreText = ui:createText("0",
+        {
+            size = "big",
+            color = Color.White,
+            bold = true,
+            outline = 0.4,
+            text
+        }
+    )
     scoreText.parentDidResize = function()
-        scoreText.pos = {UI_POSITIONS.scorePanel.x + 15, UI_POSITIONS.scorePanel.y + 40}
+        scoreText.pos = {Screen.Width - 55 - scoreText.Width, Screen.Height - 55 - scoreText.Height}
     end
-    
-    -- Score Value
-    scoreValueText = createStyledText("0", 24, UI_COLORS.primary, true)
-    scoreValueText.parentDidResize = function()
-        scoreValueText.pos = {UI_POSITIONS.scorePanel.x + 15, UI_POSITIONS.scorePanel.y + 10}
-    end
-    
-    -- Position panel background
-    scorePanel.parentDidResize = function()
-        scorePanel.pos = {UI_POSITIONS.scorePanel.x, UI_POSITIONS.scorePanel.y}
-    end
-    
-    scorePanel:parentDidResize()
     scoreText:parentDidResize()
-    scoreValueText:parentDidResize()
-end
-
-local function createHighScorePanel()
-    -- High Score Panel Background
-    local highScorePanel = ui:createFrame()
-    highScorePanel.Size = {200, 65}
-    highScorePanel.Color = UI_COLORS.background
-    highScorePanel.BorderRadius = 12
-    highScorePanel.BorderColor = UI_COLORS.border
-    highScorePanel.BorderWidth = 2
-    
-    -- High Score Label
-    highScoreText = createStyledText("BEST", 12, UI_COLORS.secondary, true)
-    highScoreText.parentDidResize = function()
-        highScoreText.pos = {UI_POSITIONS.highScorePanel.x + 15, UI_POSITIONS.highScorePanel.y + 40}
-    end
-    
-    -- High Score Value
-    highScoreValueText = createStyledText("0", 24, UI_COLORS.accent, true)
-    highScoreValueText.parentDidResize = function()
-        highScoreValueText.pos = {UI_POSITIONS.highScorePanel.x + 15, UI_POSITIONS.highScorePanel.y + 10}
-    end
-    
-    -- Position panel background
-    highScorePanel.parentDidResize = function()
-        highScorePanel.pos = {UI_POSITIONS.highScorePanel.x, UI_POSITIONS.highScorePanel.y}
-    end
-    
-    highScorePanel:parentDidResize()
-    highScoreText:parentDidResize()
-    highScoreValueText:parentDidResize()
-end
-
-local function createNewHighScoreText()
-    -- New High Score Background Panel
-    newHighScorePanel = ui:createFrame()
-    newHighScorePanel.Size = {400, 60}
-    newHighScorePanel.Color = Color(0, 0, 0, 0)  -- Start transparent
-    newHighScorePanel.BorderRadius = 12
-    newHighScorePanel.BorderColor = UI_COLORS.accent
-    newHighScorePanel.BorderWidth = 3
-    
-    newHighScoreText = createStyledText("", 32, UI_COLORS.accent, true)
-    newHighScoreText.parentDidResize = function()
-        newHighScoreText.pos = { Screen.Width / 2 - newHighScoreText.Width / 2, Screen.Height * 0.666 - newHighScoreText.Height / 2}
-    end
-    
-    -- Position background panel
-    newHighScorePanel.parentDidResize = function()
-        newHighScorePanel.pos = { Screen.Width / 2 - newHighScorePanel.Size.Width / 2, Screen.Height * 0.666 - newHighScorePanel.Size.Height / 2}
-    end
-    
-    newHighScorePanel:parentDidResize()
-    newHighScoreText:parentDidResize()
-    newHighScoreText.Text = ""  -- Start hidden
 end
 
 local function updateScoreDisplay(newScore)
-    if scoreValueText then
-        scoreValueText.Text = string.format("%.0f", newScore)
+    if scoreText then
+        scoreText.Text = string.format("%.0f", newScore)
+        scoreText:parentDidResize()  -- Reposition after text change
     end
 end
 
-local function updateHighScoreDisplay(newHighScore)
-    if highScoreValueText then
-        highScoreValueText.Text = string.format("%.0f", newHighScore)
+local function createNewHighScoreText()
+    -- Remove the background panel for the final score display
+    -- Only create the text object
+    newHighScoreText = ui:createText("", {
+        size = "big",
+        color = Color.White,
+        bold = true,
+        outline = 0.4,
+    })
+    newHighScoreText.parentDidResize = function()
+        newHighScoreText.pos = { Screen.Width / 2 - newHighScoreText.Width / 2, Screen.Height * 0.8 - newHighScoreText.Height / 2}
     end
+    newHighScoreText:parentDidResize()
+    newHighScoreText.Text = ""  -- Start hidden
+    newHighScorePanel = nil
 end
 
--- ============================================================================
--- GAME STATE MANAGEMENT FUNCTIONS
--- ============================================================================
+-- At the top of your file, add:
+-- length of a cliff
+local CLIFF_LENGTH = 85
+local CLIFF_SPAWN_INTERVAL = CLIFF_LENGTH - 15 -- match your cliff Z scale 
+local nextCliffSpawnZ = 0
 
+-- In dropPlayer, reset nextCliffSpawnZ to the player's Z position
 function dropPlayer()
     Player.Position:Set(0, 40, 0)
     Player.Rotation:Set(0, 0, 0)
     Player.Velocity:Set(0, 0, 0)
-    
-    -- Clear segments using the new system
     clearSegments()
-    
-    -- Reset game state
     targetLane = 0
     currentLane = 0
     isGameOver = false
@@ -266,19 +185,15 @@ function dropPlayer()
     Player.Animations.Walk:Stop()
     Player.Motion.Y = 0
     score = 0
-    currentState = STATES.READY  -- Start in READY state instead of RUNNING
+    currentState = STATES.READY
+    cliffSpawnZ = 0
+    lastCliffSpawnZ = -math.huge
 
     -- Update UI displays
     updateScoreDisplay(score)
-    
-    -- Hide new high score text
-    if newHighScoreText then
-        newHighScoreText.Text = ""
-    end
-    if newHighScorePanel then
-        newHighScorePanel.Color = Color(0, 0, 0, 0)  -- Make transparent
-    end
-
+    if scoreText then scoreText.IsHidden = false end
+    if newHighScoreText then newHighScoreText.Text = "" end
+    if newHighScorePanel then newHighScorePanel.Color = Color(0, 0, 0, 0) end
     if leaderboardUI then leaderboardUI:show() end
     if startButton then startButton:show() end
     if restartButton then restartButton:hide() end
@@ -292,19 +207,36 @@ function gameOver()
     print("Game Over")
     currentState = STATES.GAME_OVER
     Player.Animations.Walk:Stop()
-    clearSegments()
+    Player.Velocity = Number3(0, 0, 0)
+    -- stop all motions
+    for _, segment in ipairs(segments) do
+        for _, obstacle in ipairs(segment.obstacles) do
+            obstacle.Motion.Z = 0
+        end
+    end
+    updateCliffMotion(0)
+    --clearSegments()
     
     -- Show leaderboard UI when game is over
     leaderboardUI:show()
     
-    -- Check if this is a new high score
-    local currentHighScore = tonumber(highScoreValueText.Text) or 0
-    if score > currentHighScore then
-        if newHighScoreText and newHighScorePanel then
-            newHighScoreText.Text = "NEW HIGH SCORE: " .. string.format("%.0f", score)
-            newHighScoreText.parentDidResize()
-            newHighScorePanel.Color = UI_COLORS.background
-        end
+    -- Hide the score text in top-right
+    if scoreText then scoreText.IsHidden = true end
+    
+    -- Show final score in the center panel
+    if newHighScoreText and newHighScorePanel then
+        newHighScoreText.Text = "FINAL SCORE: " .. string.format("%.0f", score)
+        newHighScoreText.Color = Color.White
+        newHighScoreText.FontSize = 48
+        newHighScoreText.Font = "Bold"
+        newHighScoreText.Outline = 0.4
+        newHighScoreText.parentDidResize()
+    end
+    
+    -- Check if this is a new high score (simplified - just show final score for now)
+    if newHighScoreText then
+        newHighScoreText.Text = "FINAL SCORE: " .. string.format("%.0f", score)
+        newHighScoreText.parentDidResize()
     end
     
     if restartButton then restartButton:show() end
@@ -315,28 +247,21 @@ function restartGame()
     print("Restarting game...")
     currentState = STATES.RUNNING
     isGameOver = false
-    
-    -- Call dropPlayer to reset everything
     dropPlayer()
+    nextCliffSpawnZ = Player.Position.Z  -- Ensure cliff spawning resumes
 end
 
 function startGame()
     print("Starting game...")
     currentState = STATES.RUNNING
-    
-    -- Hide leaderboard UI when game starts running
     leaderboardUI:hide()
-    
-    -- Start player animation
     Player.Animations.Walk:Play()
-    
-    -- Start motion on all existing obstacles
     for _, segment in ipairs(segments) do
         for _, obstacle in ipairs(segment.obstacles) do
             obstacle.Motion.Z = -gameSpeed
         end
     end
-    
+    updateCliffMotion(gameSpeed)
     if startButton then startButton:hide() end
     if restartButton then restartButton:hide() end
 end
@@ -479,6 +404,7 @@ end
 
 -- function executed when the game starts
 Client.OnStart = function()
+
     Player.CollisionGroups = COLLISION_GROUPS.PLAYER
     Player.CollidesWithGroups = COLLISION_GROUPS.GROUND + COLLISION_GROUPS.COLLIDERS
 
@@ -555,6 +481,18 @@ Client.OnStart = function()
     World:AddChild(yellowLineRight)
     yellowLineRight.Rotation = { math.pi * 0.5, 0, 0 }
 
+    -- Create ground motion tracker object
+    groundMotionTracker = Object()
+    groundMotionTracker.Physics = PhysicsMode.Dynamic
+    groundMotionTracker.Acceleration = -Config.ConstantAcceleration
+    groundMotionTracker.Position = Number3(0, 0, 0)
+    groundMotionTracker.Mass = 1
+    groundMotionTracker.Motion.Z = -gameSpeed
+    groundMotionTracker.CollisionGroups = nil
+    groundMotionTracker.CollidesWithGroups = nil
+    World:AddChild(groundMotionTracker)
+    groundMotionLastZ = 0
+
     local function wrapMesh(mesh, scale, type)
         local wrapper = Object()
         wrapper:AddChild(mesh)
@@ -570,6 +508,7 @@ Client.OnStart = function()
             mesh.Scale = scale
             local box = Box()
             box:Fit(wrapper, { recurse = true, localBox = true})
+            box.Max -= Number3(0, 5, 2)
             wrapper.CollisionBox = box
             wrapper.CollisionGroups = COLLISION_GROUPS.COLLIDERS + COLLISION_GROUPS.MOTION
             wrapper.CollidesWithGroups = COLLISION_GROUPS.PLAYER
@@ -627,7 +566,20 @@ Client.OnStart = function()
             wrapper:AddChild(trigger)
             trigger.CollisionGroups = nil
             trigger.CollidesWithGroups = COLLISION_GROUPS.PLAYER
+
+            
+        elseif type == "cliff" then
+            -- set scale and rotation for cliff
+            local fixedRotation = Number3(0, 0, 0)
+            scale:Rotate(fixedRotation)
+            mesh.LocalRotation = fixedRotation
+            mesh.Scale = scale
+            wrapper.CollisionGroups = nil
         end
+
+        wrapper:Recurse(function(o)
+            if o.Shadow ~= nil then o.Shadow = true end
+        end, { includeRoot = true })
         return wrapper
     end
 
@@ -636,7 +588,7 @@ Client.OnStart = function()
         if response.StatusCode == 200 then
             local req = Object:Load(response.Body, function(o)
                 logPart = wrapMesh(o, Number3(30, 40, 40), "log")
-                print("Log part loaded.")
+                --print("Log part loaded.")
                 assetsLoaded = assetsLoaded + 1
                 if assetsLoaded == totalAssets then
                     currentState = STATES.MENU
@@ -649,7 +601,7 @@ Client.OnStart = function()
         if response.StatusCode == 200 then
             local req = Object:Load(response.Body, function(o)
                 wallPart = wrapMesh(o, Number3(20, 30, 50), "wall")
-                print("Wall part loaded.")
+                --print("Wall part loaded.")
                 assetsLoaded = assetsLoaded + 1
                 if assetsLoaded == totalAssets then
                     currentState = STATES.MENU
@@ -663,7 +615,7 @@ Client.OnStart = function()
         if response.StatusCode == 200 then
             local req = Object:Load(response.Body, function(o)
                 flagPart = wrapMesh(o, Number3(35, 35, 30), "flag")
-                print("Flag part loaded.")
+                --print("Flag part loaded.")
                 assetsLoaded = assetsLoaded + 1
                 if assetsLoaded == totalAssets then
                     currentState = STATES.MENU
@@ -676,8 +628,13 @@ Client.OnStart = function()
     HTTP:Get("https://files.blip.game/gltf/kenney/stairs.glb", function(response)
         if response.StatusCode == 200 then
             local req = Object:Load(response.Body, function(o)
-                stairsPart = wrapMesh(o, Number3(100, 60, 30), "stairs")
-                print("Stairs part loaded.")
+                stairsPart = wrapMesh(o, Number3(80, 55, 30), "stairs")
+                o.Material = {
+                    albedo = Color(180, 140, 90),
+                    --metallic = 0.0,
+                    --roughness = 0.2,
+                }
+                --print("Stairs part loaded.")
                 assetsLoaded = assetsLoaded + 1
                 if assetsLoaded == totalAssets then
                     currentState = STATES.MENU
@@ -693,9 +650,29 @@ Client.OnStart = function()
         end
     end)
 
+    -- load cliff slope asset
+    HTTP:Get("https://files.blip.game/gltf/kenney/cliff-slope.glb", function(response)
+        if response.StatusCode == 200 then
+            local req = Object:Load(response.Body, function(o)
+                cliffPart = wrapMesh(o, Number3(CLIFF_LENGTH, 45, 35), "cliff")
+                o.Material = {
+                    albedo = Color(120, 200, 120),
+                }
+                --print("Cliff part loaded.")
+                assetsLoaded = assetsLoaded + 1
+                
+                -- Prepopulate the cliff pool after cliff asset is loaded
+                prepopulateCliffPool(10)  -- Start with 20 cliffs in the pool
+                
+                if assetsLoaded == totalAssets then
+                    currentState = STATES.MENU
+                end
+            end)
+        end
+    end)
+
     -- Create modern UI panels
-    createScorePanel()
-    createHighScorePanel()
+    createTopRightScore()
     createNewHighScoreText()
     
     -- Load high score with callback
@@ -714,11 +691,6 @@ Client.OnStart = function()
                             break
                         end
                     end
-                    updateHighScoreDisplay(playerHighScore)
-                    -- print("Player's high score: " .. playerHighScore)
-                else
-                    updateHighScoreDisplay(0)
-                    -- print("No high score data available")
                 end
             end
         })
@@ -740,7 +712,7 @@ Client.OnStart = function()
         positionTargetBackoffDistance = 60, -- camera then tries to backoff that distance, considering collision (increased from 40)
         positionTargetMinBackoffDistance = 30, -- minimum backoff distance (increased from 20)
         positionTargetMaxBackoffDistance = 120, -- maximum backoff distance (increased from 100)
-        rotationTarget = Player.Head, -- camera rotates to that rotation (or rotation of given object)
+        rotationTarget = Rotation(math.rad(20), 0, 0), -- camera rotates to that rotation (or rotation of given object)
         rigidity = 0.3, -- how fast the camera moves to the target (reduced for smoother movement)
         collidesWithGroups = nil, -- camera will not go through objects in these groups
     }
@@ -803,7 +775,7 @@ Client.OnStart = function()
     startButton = ui:buttonPositive({content = "Start Game"})
     startButton.Width = 200
     startButton.Height = 50
-    startButton.pos = { Screen.Width / 2 - startButton.Width / 2, Screen.Height / 2 - leaderboardUI.Height - 20 }
+    startButton.pos = { Screen.Width / 2 - startButton.Width / 2, Screen.Height / 2 - leaderboardUI.Height + 40 }
     startButton.onRelease = function()
         leaderboardUI:hide()
         startButton:hide()
@@ -815,13 +787,44 @@ Client.OnStart = function()
     restartButton = ui:buttonPositive({content = "Restart Game"})
     restartButton.Width = 200
     restartButton.Height = 50
-    restartButton.pos = { Screen.Width / 2 - restartButton.Width / 2, Screen.Height / 2 - leaderboardUI.Height - 20 }
+    restartButton.pos = { Screen.Width / 2 - restartButton.Width / 2, Screen.Height / 2 - leaderboardUI.Height + 40}
     restartButton.onRelease = function()
         leaderboardUI:hide()
         restartButton:hide()
         restartGame()
+        startGame()
     end
     restartButton:hide()
+
+    function spawnTreesOnCliff(cliff)
+        -- Check if trees already exist by looking for tree children
+        if cliff.hasTrees then
+            return
+        end        
+
+        cliff.hasTrees = true
+        -- Place two trees at 1/3 and 2/3 along the local X axis of the cliff
+        local positions = {
+            -CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.3,
+            -CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.7,
+            -- -CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.25,
+            -- -CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.75
+        }
+
+        for _, x in ipairs(positions) do
+            local treeAsset = Config.Items[math.random(1, #Config.Items)]
+            local tree = Shape(treeAsset)
+            cliff:AddChild(tree)
+            tree.Name = "tree"  -- Give trees a name for identification
+            tree.Pivot = {tree.Width * 0.5, 0, tree.Depth * 0.5}
+            tree.LocalPosition = Number3(x, 16, 0)
+            tree.Scale = Number3(1, 1, 0.7)
+            tree.CollisionGroups = nil
+            tree.CollidesWithGroups = nil
+            tree.Physics = PhysicsMode.Disabled
+            tree.Shadow = true
+        end
+    end
 end
 
 function updateSegments(gameProgress)
@@ -857,32 +860,35 @@ function updateSegments(gameProgress)
         currentSpawnZ = currentSpawnZ + SPAWN_SPACING  -- Increased spacing to reduce spawn frequency
     end
 
-    -- Remove old segments whose obstacles are all behind the player
-    for i = #segments, 1, -1 do
-        local segment = segments[i]
-        local allBehind = true
-        for _, obstacle in ipairs(segment.obstacles) do
-            if obstacle.Position.Z >= Player.Position.Z - 50 then
-                allBehind = false
-                break
-            end
-        end
-        if allBehind then
-            for _, obstacle in ipairs(segment.obstacles) do
-                if obstacle and obstacle.Parent then  -- Check if obstacle still exists
-                    World:RemoveChild(obstacle)
-                    obstaclesByRef[obstacle] = nil
-                end
-            end
-            table.remove(segments, i)
-        end
-    end
-    
     -- Additional cleanup: remove any obstacles that are too far behind
     for obstacle, _ in pairs(obstaclesByRef) do
-        if obstacle and obstacle.Parent and obstacle.Position.Z < Player.Position.Z - CLEANUP_DISTANCE then
+        if obstacle and obstacle.Parent and obstacle.Position.Z < -CLEANUP_DISTANCE then
             World:RemoveChild(obstacle)
+            obstacle.IsHidden = true
+            local type = obstaclesByRef[obstacle]
+            if type and obstaclePools[type] then
+                table.insert(obstaclePools[type], obstacle)
+                if type == "cliff" then
+                    --activeCliffCount -= 1  -- Decrement active count
+                end
+            end
+            -- Remove from segments
+            for _, segment in ipairs(segments) do
+                for i = #segment.obstacles, 1, -1 do
+                    if segment.obstacles[i] == obstacle then
+                        table.remove(segment.obstacles, i)
+                        break
+                    end
+                end
+            end
             obstaclesByRef[obstacle] = nil
+        end
+    end
+
+    -- Remove empty segments
+    for i = #segments, 1, -1 do
+        if #segments[i].obstacles == 0 then
+            table.remove(segments, i)
         end
     end
 end
@@ -930,50 +936,86 @@ function wouldCreateImpossibleSegment(lane, obstacleType, zPosition)
     return wallsInOtherLanes >= 2
 end
 
+-- Restore getPooledObstacle for pooling
+function getPooledObstacle(obstacleType)
+    local pool = obstaclePools[obstacleType]
+    if pool and #pool > 0 then
+        local obj = table.remove(pool)
+        obj.IsHidden = false
+        if obstacleType == "cliff" then
+           -- print("Spawned cliff from pool (recycled)")
+        end
+        return obj
+    else
+        if obstacleType == "log" and logPart then
+            return logPart:Copy({ includeChildren = true })
+        elseif obstacleType == "wall" and wallPart then
+            return wallPart:Copy({ includeChildren = true })
+        elseif obstacleType == "flag" and flagPart then
+            return flagPart:Copy({ includeChildren = true })
+        elseif obstacleType == "stairs" and stairsPart then
+            return stairsPart:Copy({ includeChildren = true })
+        elseif obstacleType == "cliff" and cliffPart then
+            --print("Spawned new cliff (not recycled)")
+            return cliffPart:Copy({ includeChildren = true })
+        end
+    end
+    return nil
+end
+
+-- Restore spawnObstacle for lane obstacles
+function spawnObstacle(obstacleType, lane, zPosition)
+    local obstacle = getPooledObstacle(obstacleType)
+    if not obstacle then
+        return nil
+    end
+    obstaclesByRef[obstacle] = obstacleType
+    setObstaclePosition(obstacle, lane, zPosition)
+    obstacle.Mass = 1000
+    if currentState == STATES.RUNNING then
+        obstacle.Motion.Z = -gameSpeed
+    else
+        obstacle.Motion.Z = 0
+    end
+    obstacle.Friction = 0
+    obstacle.Acceleration = -Config.ConstantAcceleration
+    obstacle.Velocity = Number3(0, 0, 0)
+    World:AddChild(obstacle)
+    return obstacle
+end
+
 function spawnObstaclesAtPosition(zPosition)
     local spawnedObstacles = {}
-    
-    -- Check each lane for spawning
+    -- Lane obstacles
     for lane = -1, 1 do
         local tracker = getLaneTracker(lane)
         if tracker and canSpawnInLane(lane, zPosition) then
             local obstacleData = selectObstacleType()
-            
-            -- Check if spawning this obstacle would create an impossible segment
             if wouldCreateImpossibleSegment(lane, obstacleData.type, zPosition) then
-                return
+                return spawnedObstacles
             end
-            
-            -- If it's a wall, start a wall train
             if obstacleData.type == "wall" and obstacleData.trainLength then
-                    local trainLength = math.random(obstacleData.trainLength[1], obstacleData.trainLength[2])
-                    tracker.wallTrainCount = trainLength
-                    tracker.stairsSpawned = false
-                    
-                    -- 50% chance to spawn stairs at the start of the wall train
-                    if math.random() <= 0.5 then
-                        local stairsObstacle = spawnObstacle("stairs", lane, zPosition)
-                        if stairsObstacle then
-                            table.insert(spawnedObstacles, stairsObstacle)
-                            tracker.stairsSpawned = true
-                        end
+                local trainLength = math.random(obstacleData.trainLength[1], obstacleData.trainLength[2])
+                tracker.wallTrainCount = trainLength
+                tracker.stairsSpawned = false
+                if math.random() <= 0.5 then
+                    local stairsObstacle = spawnObstacle("stairs", lane, zPosition + 10)
+                    if stairsObstacle then
+                        table.insert(spawnedObstacles, stairsObstacle)
+                        tracker.stairsSpawned = true
                     end
-                    
-                    -- Spawn all walls in the train at once with Z offsets
-                    for i = 1, trainLength do
-                        local wallZ = zPosition + (i * WALL_SPACING)
-                        local wallObstacle = spawnObstacle("wall", lane, wallZ)
-                        if wallObstacle then
-                            table.insert(spawnedObstacles, wallObstacle)
-                        end
+                end
+                for i = 1, trainLength do
+                    local wallZ = zPosition + (i * WALL_SPACING)
+                    local wallObstacle = spawnObstacle("wall", lane, wallZ)
+                    if wallObstacle then
+                        table.insert(spawnedObstacles, wallObstacle)
                     end
-                    
-                    -- Update the lane tracker - mark that this wall train is complete
-                    tracker.lastSpawnZ = zPosition + ((trainLength - 1) * WALL_SPACING)
-                    tracker.minDistance = obstacleData.minDistance
-                    tracker.wallTrainCount = 0  -- Reset wall train count after spawning
+                end
+                tracker.lastSpawnZ = zPosition + ((trainLength - 1) * WALL_SPACING)
+                tracker.minDistance = obstacleData.minDistance
+                tracker.wallTrainCount = 0
             else
-                 -- For non-wall obstacles, spawn normally
                 local obstacle = spawnObstacle(obstacleData.type, lane, zPosition)
                 if obstacle then
                     table.insert(spawnedObstacles, obstacle)
@@ -987,52 +1029,41 @@ function spawnObstaclesAtPosition(zPosition)
 end
 
 function setObstaclePosition(obstacle, lane, zPosition)
-    obstacle.Position = Number3(lane * LANE_WIDTH, groundLevel + GROUND_OFFSET, zPosition)
+    -- set logs higher for now
+    local y = groundLevel + GROUND_OFFSET
+    if obstaclesByRef[obstacle] == "log" then
+        y += 3
+    end
+    obstacle.Position = Number3(lane * LANE_WIDTH, y, zPosition)
 end
 
-function spawnObstacle(obstacleType, lane, zPosition)
-    local obstacle
-    
-    -- Check if required assets are loaded
-    if obstacleType == "log" and logPart == nil then
-        return nil
-    elseif obstacleType == "wall" and wallPart == nil then
-        return nil
-    elseif obstacleType == "flag" and flagPart == nil then
-        return nil
-    elseif obstacleType == "stairs" and stairsPart == nil then
-        return nil
+-- Add at the top with other obstacle variables
+obstaclePools = {
+    log = {},
+    wall = {},
+    flag = {},
+    stairs = {},
+    cliff = {},
+}
+
+-- Cliff management
+local MAX_ACTIVE_CLIFFS = 20  -- Maximum number of active cliffs
+local activeCliffCount = 0
+
+-- Function to prepopulate the cliff pool
+function prepopulateCliffPool(poolSize)
+    if not cliffPart then
+        print("Cannot prepopulate cliff pool - cliffPart not loaded yet")
+        return
     end
     
-    if obstacleType == "log" then
-        obstacle = logPart:Copy({ includeChildren = true })
-    elseif obstacleType == "wall" then
-        obstacle = wallPart:Copy({ includeChildren = true })
-    elseif obstacleType == "flag" then
-        obstacle = flagPart:Copy({ includeChildren = true })
-    elseif obstacleType == "stairs" then
-        obstacle = stairsPart:Copy({ includeChildren = true })
+    --print("Prepopulating cliff pool with " .. poolSize .. " cliffs...")
+    for i = 1, poolSize do
+        local cliff = cliffPart:Copy({ includeChildren = true })
+        cliff.IsHidden = true
+        table.insert(obstaclePools.cliff, cliff)
     end
-    
-    if obstacle then
-        setObstaclePosition(obstacle, lane, zPosition)
-        obstacle.Mass = 1000
-        if currentState == STATES.RUNNING then
-            obstacle.Motion.Z = -gameSpeed
-        else
-            obstacle.Motion.Z = 0
-        end
-        obstacle.Friction = 0
-        obstacle.Acceleration = -Config.ConstantAcceleration
-        obstacle.Velocity = Number3(0, 0, 0)
-        
-        World:AddChild(obstacle)
-        obstaclesByRef[obstacle] = obstacleType
-        
-        return obstacle
-    end
-    
-    return nil
+    --print("Cliff pool prepopulated with " .. #obstaclePools.cliff .. " cliffs")
 end
 
 function getLaneTracker(lane)
@@ -1090,15 +1121,32 @@ function updateObstacleSpeed(newSpeed)
     end
 end
 
+-- Update clearSegments and cleanup code to return obstacles to the pool
 function clearSegments()
     for _, segment in ipairs(segments) do
         for _, obstacle in ipairs(segment.obstacles) do
+            if obstacle and obstacle.Parent then
+                World:RemoveChild(obstacle)
+                obstacle.IsHidden = true
+                local type = obstaclesByRef[obstacle]
+                if type and obstaclePools[type] then
+                    table.insert(obstaclePools[type], obstacle)
+                end
+                obstaclesByRef[obstacle] = nil
+            end
+        end
+    end
+    -- Also recycle any remaining cliffs in the world (not in segments)
+    for obstacle, type in pairs(obstaclesByRef) do
+        if type == "cliff" and obstacle.Parent then
+            activeCliffCount -= 1
             World:RemoveChild(obstacle)
+            obstacle.IsHidden = true
+            table.insert(obstaclePools.cliff, obstacle)
             obstaclesByRef[obstacle] = nil
         end
     end
     segments = {}
-    
     -- Reset lane trackers
     laneTrackers.left.lastSpawnZ = 0
     laneTrackers.center.lastSpawnZ = 0
@@ -1112,6 +1160,15 @@ function clearSegments()
     laneTrackers.left.stairsSpawned = false
     laneTrackers.center.stairsSpawned = false
     laneTrackers.right.stairsSpawned = false
+end
+
+-- Add a helper to update all cliff motions
+function updateCliffMotion(newSpeed)
+    for obstacle, type in pairs(obstaclesByRef) do
+        if type == "cliff" then
+            obstacle.Motion.Z = -newSpeed
+        end
+    end
 end
 
 Client.Tick = function(dt)
@@ -1156,21 +1213,28 @@ Client.Tick = function(dt)
         Player.Animations.Walk.Speed = ANIMATION_SPEED * SLOW_DOWN_MULTIPLIER
         gameSpeed = NORMAL_GAME_SPEED * SLOW_DOWN_MULTIPLIER
         updateObstacleSpeed(gameSpeed)
+        updateCliffMotion(gameSpeed)
         if slowDownTimer <= 0 then
             isSlowDownActive = false
             gameSpeed = NORMAL_GAME_SPEED * difficultyMultiplier  -- Use current difficulty multiplier
             Player.Animations.Walk.Speed = ANIMATION_SPEED
             Player.Animations.Walk:Play()  -- Ensure walk animation is playing
             updateObstacleSpeed(gameSpeed)
+            updateCliffMotion(gameSpeed)
         end
     end
 
     updateSegments(gameProgress)
-    groundImage.Offset.Y = groundImage.Offset.Y - dt * gameSpeed * GROUND_MOTION_MULTIPLIER
-    yellowLineLeft.Offset.Y = yellowLineLeft.Offset.Y - dt * gameSpeed * GROUND_MOTION_MULTIPLIER
-    yellowLineMiddle.Offset.Y = yellowLineMiddle.Offset.Y - dt * gameSpeed * GROUND_MOTION_MULTIPLIER
-    yellowLineRight.Offset.Y = yellowLineRight.Offset.Y - dt * gameSpeed * GROUND_MOTION_MULTIPLIER
+    groundMotionTracker.Motion.Z = -gameSpeed
 
+    -- Calculate offset based on position delta
+    local dz = groundMotionTracker.Position.Z - (groundMotionLastZ or 0)
+    groundMotionLastZ = groundMotionTracker.Position.Z
+    -- Use dz to update groundImage and yellow line offsets
+    groundImage.Offset.Y = groundImage.Offset.Y + dz * GROUND_MOTION_MULTIPLIER
+    yellowLineLeft.Offset.Y = yellowLineLeft.Offset.Y + dz * GROUND_MOTION_MULTIPLIER
+    yellowLineMiddle.Offset.Y = yellowLineMiddle.Offset.Y + dz * GROUND_MOTION_MULTIPLIER
+    yellowLineRight.Offset.Y = yellowLineRight.Offset.Y + dz * GROUND_MOTION_MULTIPLIER
 
     if isMoving then
         targetLane = math.max(-1, math.min(1, targetLane))
@@ -1179,6 +1243,42 @@ Client.Tick = function(dt)
         if math.abs(targetPosition.X - Player.Position.X) < LANE_MOVEMENT_THRESHOLD then
             currentLane = targetLane
             isMoving = false
+        end
+    end
+
+    local function getActiveCliffCountAndFurthestZ()
+        local count = 0
+        local maxZ = 0
+        for obstacle, type in pairs(obstaclesByRef) do
+            if type == "cliff" and obstacle.Parent then
+                count = count + 1
+                if obstacle.Position.Z > maxZ then
+                    maxZ = obstacle.Position.Z
+                end
+            end
+        end
+        return count, maxZ
+    end
+
+    local count, furthestZ = getActiveCliffCountAndFurthestZ()
+    while count < MAX_ACTIVE_CLIFFS do
+        local spawnZ = (count == 0 and 0) or (furthestZ + CLIFF_SPAWN_INTERVAL)
+        local cliffRight = spawnObstacle("cliff", 2.1, spawnZ)
+        local cliffLeft = spawnObstacle("cliff", -2.1, spawnZ)
+        if cliffRight and cliffLeft then
+            cliffRight.Rotation = Number3(0, math.pi/2, 0)
+            cliffLeft.Rotation = Number3(0, -math.pi/2, 0)
+            if currentState == STATES.RUNNING then
+                cliffRight.Motion.Z = -gameSpeed
+                cliffLeft.Motion.Z = -gameSpeed
+            end
+            spawnTreesOnCliff(cliffRight)
+            spawnTreesOnCliff(cliffLeft)
+            count = count + 2
+            furthestZ = spawnZ
+           --wned cliffs at Z: " .. spawnZ .. ", Pool size: " .. #obstaclePools.cliff .. ", Active cliffs: " .. count)
+        else
+            break
         end
     end
 end
