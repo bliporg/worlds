@@ -4,7 +4,7 @@ Modules = {
     ease = "ease",
     ui = "uikit",
     webquad = "github.com/aduermael/modzh/webquad:7fbc37d",
-    niceleaderboard = "github.com/aduermael/modzh/niceleaderboard:d1d7c49",
+    niceleaderboard = "github.com/aduermael/modzh/niceleaderboard:47c44c8",
 }
     
 Config.Items = {
@@ -18,7 +18,7 @@ Config.Items = {
 Config.ConstantAcceleration *= 2
 
 -- CONSTANTS
-local GROUND_MOTION_MULTIPLIER = 1/64  -- NEEDS UPDATED VALUE
+local GROUND_MOTION_MULTIPLIER = 1/1536  -- NEEDS UPDATED VALUE
 local JUMP_STRENGTH = 150
 local SCORE_PER_SECOND = 100
 local ANIMATION_SPEED = 1.5
@@ -37,9 +37,19 @@ local MAX_SPAWN_DISTANCE = 400  -- Maximum distance to spawn obstacles ahead
 local SPAWN_SPACING = 50  -- Spacing between spawn attempts
 local MAX_SPAWNS_PER_FRAME = 10  -- Maximum obstacles to spawn per frame
 local CLEANUP_DISTANCE = 80 -- Distance behind player to clean up obstacles
-local STAIRS_BOOST_MULTIPLIER = 1.5  -- Multiplier for stairs boost
+local STAIRS_BOOST_MULTIPLIER = 3.0  -- Multiplier for stairs boost (increased for high speeds)
 local LANE_MOVEMENT_SPEED = 1000  -- Speed multiplier for lane movement
 local LANE_MOVEMENT_THRESHOLD = 0.01  -- Threshold for lane movement completion
+
+-- Tutorial constants
+local TUTORIAL_ENABLED = true  -- Set to true to enable tutorial
+local TUTORIAL_WALL_Z = 200  -- Z position for tutorial walls (increased from 50)
+local TUTORIAL_LOG_Z = 500   -- Z position for tutorial logs (increased spacing)
+local TUTORIAL_FLAG_Z = 700  -- Z position for tutorial flags (better spacing)
+local TUTORIAL_COMPLETE_Z = 800  -- Z position where tutorial ends (increased from 350)
+
+local TUTORIAL_END_BUFFER = 80  -- how far past the flags before tutorial ends
+
 local STATES = {
     LOADING = 1,
     MENU = 2,
@@ -101,7 +111,7 @@ local difficultyMultiplier = 1.0  -- Current difficulty multiplier
 local gameTime = 0  -- Total time the game has been running
 local isCrouching = false
 local crouchTimer = 0
-local CROUCH_DURATION = 1.0  -- How long to stay crouched
+local CROUCH_DURATION = 0.5  -- How long to stay crouched
 local NORMAL_SCALE = 0.5  -- The player's normal scale
 local CROUCH_SCALE = 0.25  -- How much to scale down when crouching (50% of normal size)
 local wantsToCrouch = false  -- Track if player wants to crouch while in air
@@ -110,13 +120,36 @@ local newHighScoreText = nil
 local newHighScorePanel = nil
 local currentState = STATES.LOADING
 local assetsLoaded = 0
-local totalAssets = 5  -- log, wall, flag, stairs, cliff
+local totalAssets = 6  -- log, wall, flag, stairs, cliff, tutorial_completed
 local startButton = nil
 local restartButton = nil
 
+-- Tutorial state variables
+local tutorialState = 0  -- 0 = not started, 1 = walls, 2 = logs, 3 = flags, 4 = complete
+local tutorialText = nil
+local tutorialObstacles = {}  -- Track tutorial obstacles for cleanup
+local tutorialStarted = false
+local tutorialCompleted = false
+
+-- Footstep sound variables
+local footstepTimer = 0
+local FOOTSTEP_INTERVAL = 0.33  -- Time between footsteps in seconds
+local lastPlayerOnGround = false
+local lastConcreteSound = 0  -- Track last concrete sound time for cooldown
+local lastConcreteLanding = 0  -- Track last concrete landing sound time for cooldown
+local lastConcreteTransition = nil  -- Track when player transitions to concrete
+
+-- Flashing effect variables
+local flashTimer = 0
+local FLASH_INTERVAL = 0.1  -- Time between flash toggles in seconds
+local isFlashing = false
+local showLeaderboardTimer = 0  -- Timer for showing leaderboard after game over
+
+local OBSTACLE_SPAWN_Z_OFFSET = 850
 
 local function createTopRightScore()
     -- Create score text in top-right corner
+    node = ui:frameTextBackground()
     scoreText = ui:createText("0",
         {
             size = "big",
@@ -126,16 +159,19 @@ local function createTopRightScore()
             text
         }
     )
-    scoreText.parentDidResize = function()
-        scoreText.pos = {Screen.Width - 55 - scoreText.Width, Screen.Height - 55 - scoreText.Height}
+    scoreText:setParent(node)
+    node.parentDidResize = function()
+        node.pos = {Screen.Width - 55 - node.Width, Screen.Height - 55 - node.Height}
+        node.size = {scoreText.Width + 12, scoreText.Height + 10}
+        scoreText.pos = {5, 5}
     end
-    scoreText:parentDidResize()
+    node:parentDidResize()
 end
 
 local function updateScoreDisplay(newScore)
     if scoreText then
         scoreText.Text = string.format("%.0f", newScore)
-        scoreText:parentDidResize()  -- Reposition after text change
+        node.parentDidResize()  -- Reposition after text change
     end
 end
 
@@ -154,6 +190,36 @@ local function createNewHighScoreText()
     newHighScoreText:parentDidResize()
     newHighScoreText.Text = ""  -- Start hidden
     newHighScorePanel = nil
+end
+
+local function createTutorialText()
+    tutorialText = ui:createText("", {
+        size = "medium",
+        color = Color.White,
+        bold = true,
+        outline = 0.4,
+    })
+    tutorialText.parentDidResize = function()
+        tutorialText.pos = { Screen.Width / 2 - tutorialText.Width / 2, Screen.Height * 0.15 - tutorialText.Height / 2}
+        tutorialText.object.MaxWidth = Screen.Width * 0.8
+    end
+    tutorialText:parentDidResize()
+    tutorialText.Text = ""
+    tutorialText.IsHidden = true
+end
+
+local function showTutorialText(text)
+    if tutorialText then
+        tutorialText.Text = text
+        tutorialText.IsHidden = false
+        tutorialText:parentDidResize()
+    end
+end
+
+local function hideTutorialText()
+    if tutorialText then
+        tutorialText.IsHidden = true
+    end
 end
 
 -- At the top of your file, add:
@@ -188,6 +254,21 @@ function dropPlayer()
     currentState = STATES.READY
     cliffSpawnZ = 0
     lastCliffSpawnZ = -math.huge
+    
+    -- Reset tutorial state for new game
+    tutorialState = 0
+    tutorialStarted = false
+    -- tutorialCompleted should preserve the value from KeyValueStore
+    cleanupTutorialObstacles()
+    hideTutorialText()
+    
+    -- Reset footstep timer
+    footstepTimer = 0
+    
+    -- Reset flashing state
+    flashTimer = 0
+    isFlashing = false
+    Player.IsHidden = false
 
     -- Update UI displays
     updateScoreDisplay(score)
@@ -202,12 +283,17 @@ end
 function gameOver()
     leaderboard:set({score = score, callback = function() 
         loadHighScore()
+        -- Reload the leaderboard UI after the score is submitted
+        leaderboardUI:reload()
     end})
     isGameOver = true
+    sfx("death_scream_guy_4", { Volume = 0.5, Pitch = math.random() * 0.5 + 0.8, Spatialized = false })
     print("Game Over")
     currentState = STATES.GAME_OVER
     Player.Animations.Walk:Stop()
     Player.Velocity = Number3(0, 0, 0)
+    -- Ensure player is visible when game ends
+    Player.IsHidden = false
     -- stop all motions
     for _, segment in ipairs(segments) do
         for _, obstacle in ipairs(segment.obstacles) do
@@ -215,14 +301,26 @@ function gameOver()
         end
     end
     updateCliffMotion(0)
-    --clearSegments()
-    
+    -- stop tutorial obstacles
+    for _, obstacle in ipairs(tutorialObstacles) do
+        if obstacle and obstacle.Parent then
+            obstacle.Motion.Z = 0
+        end
+    end
+    -- stop all cliffs
+    for obstacle, type in pairs(obstaclesByRef) do
+        if type == "cliff" and obstacle and obstacle.Parent then
+            obstacle.Motion.Z = 0
+        end
+    end
     -- Show leaderboard UI when game is over
-    leaderboardUI:show()
-    
+    -- add a 2 second delay before showing the leaderboard
+    showLeaderboardTimer = 2
     -- Hide the score text in top-right
-    if scoreText then scoreText.IsHidden = true end
-    
+    if scoreText then 
+        scoreText.IsHidden = true 
+        node.IsHidden = true
+    end
     -- Show final score in the center panel
     if newHighScoreText and newHighScorePanel then
         newHighScoreText.Text = "FINAL SCORE: " .. string.format("%.0f", score)
@@ -232,13 +330,11 @@ function gameOver()
         newHighScoreText.Outline = 0.4
         newHighScoreText.parentDidResize()
     end
-    
     -- Check if this is a new high score (simplified - just show final score for now)
     if newHighScoreText then
         newHighScoreText.Text = "FINAL SCORE: " .. string.format("%.0f", score)
         newHighScoreText.parentDidResize()
     end
-    
     if restartButton then restartButton:show() end
     if startButton then startButton:hide() end
 end
@@ -256,6 +352,11 @@ function startGame()
     currentState = STATES.RUNNING
     leaderboardUI:hide()
     Player.Animations.Walk:Play()
+    
+    -- Set high speed for testing
+    --gameSpeed = NORMAL_GAME_SPEED * 4.0  -- Start at 3x speed
+    --gameTime = 80  -- Simulate 60 seconds of gameplay for high difficulty
+    
     for _, segment in ipairs(segments) do
         for _, obstacle in ipairs(segment.obstacles) do
             obstacle.Motion.Z = -gameSpeed
@@ -264,6 +365,13 @@ function startGame()
     updateCliffMotion(gameSpeed)
     if startButton then startButton:hide() end
     if restartButton then restartButton:hide() end
+    if scoreText then scoreText.IsHidden = false end
+    if node then node.IsHidden = false end
+    
+    -- Start tutorial if enabled
+    if TUTORIAL_ENABLED then
+        startTutorial()
+    end
 end
 
 -- ============================================================================
@@ -289,6 +397,9 @@ function cancelCrouch()
         isCrouching = false
         crouchTimer = 0
         Player.Scale.Y = NORMAL_SCALE  -- Return to normal size
+        
+        -- Check for collisions when manually uncrouching
+        checkForObstacleCollisions()
     end
     wantsToCrouch = false  -- Also cancel any pending air crouch
 end
@@ -307,6 +418,49 @@ function updateCrouch(dt)
         if crouchTimer <= 0 then
             isCrouching = false
             Player.Scale.Y = NORMAL_SCALE  -- Return to normal size
+            
+            -- Check for collisions when uncrouching
+            checkForObstacleCollisions()
+        end
+    end
+end
+
+-- Add a function to check for obstacle collisions - for flag and crouching
+function checkForObstacleCollisions()
+    -- Check if player is colliding with any obstacles after uncrouching
+    for obstacle, obstacleType in pairs(obstaclesByRef) do
+        if obstacle and obstacle.Parent and obstacleType ~= "stairs" then
+            -- Get the obstacle's collision box
+            local obstacleBox = obstacle.CollisionBox
+            if obstacleBox then
+                -- Get player's collision box
+                local playerBox = Player.CollisionBox
+                if playerBox then
+                    -- Check if the boxes overlap
+                    local playerMin = Player.Position + playerBox.Min
+                    local playerMax = Player.Position + playerBox.Max
+                    local obstacleMin = obstacle.Position + obstacleBox.Min
+                    local obstacleMax = obstacle.Position + obstacleBox.Max
+                    
+                    -- Check for overlap
+                    if playerMin.X < obstacleMax.X and playerMax.X > obstacleMin.X and
+                       playerMin.Y < obstacleMax.Y and playerMax.Y > obstacleMin.Y and
+                       playerMin.Z < obstacleMax.Z and playerMax.Z > obstacleMin.Z then
+                        -- Player is colliding with an obstacle, trigger game over
+                        Player.Position.Y = 0
+                        
+                        -- Play collision sound based on obstacle type
+                        if obstacleType == "log" then
+                            sfx("wood_impact_5", { Volume = 0.6, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
+                        else
+                            sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
+                        end
+                        
+                        gameOver()
+                        return
+                    end
+                end
+            end
         end
     end
 end
@@ -316,13 +470,20 @@ if Client.IsMobile then
     Client.Action1 = nil
 else
     Client.DirectionalPad = function(x, y)
+        -- Only allow controls when game is running
+        if currentState ~= STATES.RUNNING then
+            return
+        end
+        
         -- Only allow movement/crouch/jump, not game start/restart
         if x == 1 then
             targetLane += 1
             isMoving = true
+            sfx("whooshes_small_1", { Volume = 0.5, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
         elseif x == -1 then
             targetLane -= 1
             isMoving = true
+            sfx("whooshes_small_1", { Volume = 0.5, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
         end
         if y == 1 then
             if Player.IsOnGround then
@@ -353,11 +514,74 @@ Pointer.Cancel = function(pe)
 end
 
 function updateScore(dt)
-    score = score + (SCORE_PER_SECOND * dt)
+    -- Score increases based on game speed multiplier for higher difficulty = higher rewards
+    local scoreMultiplier = difficultyMultiplier or 1.0
+    score = score + (SCORE_PER_SECOND * scoreMultiplier * dt)
+end
+
+function updateFootsteps(dt)
+    -- Only play footsteps when game is running and player is on ground
+    if currentState == STATES.RUNNING and Player.IsOnGround then
+        footstepTimer = footstepTimer + dt
+        
+        -- Play footstep sound at regular intervals
+        if footstepTimer >= FOOTSTEP_INTERVAL then
+            if Player.Position.Y > 41 then
+                -- Player is on top of a wall - use concrete sound for walking
+                sfx("walk_concrete_1", { Volume = 0.3, Pitch = 2.5, Spatialized = false })
+            else
+                -- Player is on ground - use grass sound for walking
+                sfx("walk_grass_1", { Volume = 0.4, Pitch = 2.5, Spatialized = false })
+            end
+            footstepTimer = footstepTimer % FOOTSTEP_INTERVAL  -- Use modulo instead of reset to 0
+        end
+    else
+        -- Only reset timer when game is not running, not when player is in air
+        if currentState ~= STATES.RUNNING then
+            if footstepTimer > 0 then
+                print("Footstep timer reset: currentState=" .. currentState .. ", IsOnGround=" .. tostring(Player.IsOnGround))
+            end
+            footstepTimer = 0
+        end
+    end
+    
+    -- Play immediate sound when transitioning to concrete
+    if currentState == STATES.RUNNING and Player.IsOnGround and Player.Position.Y > 41 then
+        if not lastConcreteTransition or (os.clock() - lastConcreteTransition) > 0.1 then
+            if not lastConcreteTransition then
+                -- First time on concrete, play sound immediately
+                sfx("walk_concrete_1", { Volume = 0.3, Pitch = 2.5, Spatialized = false })
+            end
+            lastConcreteTransition = os.clock()
+        end
+    else
+        lastConcreteTransition = nil
+    end
+end
+
+function updateFlashing(dt)
+    if isSlowDownActive then
+        flashTimer = flashTimer + dt
+        
+        -- Toggle player visibility for flashing effect
+        if flashTimer >= FLASH_INTERVAL then
+            Player.IsHidden = not Player.IsHidden
+            flashTimer = 0
+        end
+    else
+        -- Stop flashing and ensure player is visible when not slowed down
+        Player.IsHidden = false
+        flashTimer = 0
+    end
 end
 
 -- Called when Pointer is "shown" (Pointer.IsHidden == false), which is the case by default.
 Pointer.Drag = function(pe)
+    -- Only allow controls when game is running
+    if currentState ~= STATES.RUNNING then
+        return
+    end
+    
     local pos = Number2(pe.X, pe.Y) * Screen.Size
     local Xdiff = pos.X - downPos.X
     local Ydiff = pos.Y - downPos.Y
@@ -368,10 +592,12 @@ Pointer.Drag = function(pe)
             swipeTriggered = true
             targetLane += 1
             isMoving = true
+            sfx("whooshes_small_1", { Volume = 0.5, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
         elseif Xdiff < -SWIPE_THRESHOLD and currentLane >= 0 then
             swipeTriggered = true
             targetLane -= 1
             isMoving = true
+            sfx("whooshes_small_1", { Volume = 0.5, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
         elseif Ydiff > SWIPE_THRESHOLD then
             swipeTriggered = true
             if Player.IsOnGround then
@@ -405,6 +631,26 @@ end
 -- function executed when the game starts
 Client.OnStart = function()
 
+    local store = KeyValueStore(Player.UserID)
+    --store:Set("tutorial_completed", false, function(success) end)
+    store:Get("tutorial_completed", function(success, results)
+        if success then 
+            tutorialCompleted = results.tutorial_completed
+            assetsLoaded += 1
+            if assetsLoaded == totalAssets then
+                currentState = STATES.MENU
+            end
+            -- Move the tutorial completion check here, after everything is loaded
+            print("Tutorial completed: " .. tostring(tutorialCompleted))
+            if tutorialCompleted then
+                OBSTACLE_SPAWN_Z_OFFSET = 0
+                TUTORIAL_ENABLED = false
+                print("Tutorial disabled due to previous completion")
+            end
+            print("KeyValueStore: " .. tostring(results.tutorial_completed))
+        end
+    end)
+
     Player.CollisionGroups = COLLISION_GROUPS.PLAYER
     Player.CollidesWithGroups = COLLISION_GROUPS.GROUND + COLLISION_GROUPS.COLLIDERS
 
@@ -427,59 +673,48 @@ Client.OnStart = function()
     leaderboardUI:reload()
 
     -- ground texture
-    groundImage = webquad:create({
+    groundImageMiddle = webquad:create({
         color = Color.White,
-        url = "https://files.cu.bzh/textures/asphalt.png",
+        url = "https://files.blip.game/textures/grass-with-path.jpg",
     })
-    local tiling = BUILDING_FAR / 32
-    groundImage.Width = BUILDING_FAR * 2
-    groundImage.Height = BUILDING_FAR * 2
-    groundImage.Tiling = { tiling, tiling }
-    groundImage.Anchor = { 0.5, 0.5 }
-    groundImage.IsDoubleSided = false
-    groundImage.Position.Y = groundLevel
-    World:AddChild(groundImage)
-    groundImage.Rotation = { math.pi * 0.5, 0, 0 }
+    groundImageMiddle.Width = LANE_WIDTH * 5
+    groundImageMiddle.Height = BUILDING_FAR * 2
+    tilingY = groundImageMiddle.Height / 1536
+    groundImageMiddle.Tiling = { 5, tilingY }
+    groundImageMiddle.Anchor = { 0.5, 0.5 }
+    groundImageMiddle.IsDoubleSided = false
+    groundImageMiddle.Position = { 0, groundLevel, 0 }
+    World:AddChild(groundImageMiddle)
+    groundImageMiddle.Rotation = { math.pi * 0.5, 0, 0 }
 
-    -- yellow lines (placeoholder for lanes)
-    yellowLineLeft = webquad:create({
-        color = Color.White,
-        url = "https://files.cu.bzh/textures/asphalt-yellow-lines.png",
-    })
-    yellowLineLeft.Width = 3
-    yellowLineLeft.Height = BUILDING_FAR * 2
-    yellowLineLeft.Tiling = { 1, tiling }
-    yellowLineLeft.Anchor = { 0.5, 0.5 }
-    yellowLineLeft.IsDoubleSided = false
-    yellowLineLeft.Position = groundImage.Position + { -LANE_WIDTH, 0.1, 0 }
-    World:AddChild(yellowLineLeft)
-    yellowLineLeft.Rotation = { math.pi * 0.5, 0, 0 }
+    -- groundImageRight = webquad:create({
+    --     color = Color.White,
+    --     url = "https://files.blip.game/textures/grass-with-path.jpg",
+    -- })
+    -- local tiling = BUILDING_FAR / 32
+    -- groundImageRight.Width = LANE_WIDTH
+    -- groundImageRight.Height = BUILDING_FAR * 2
+    -- groundImageRight.Tiling = { tiling, tiling }
+    -- groundImageRight.Anchor = { 0.5, 0.5 }
+    -- groundImageRight.IsDoubleSided = false
+    -- groundImageRight.Position = { LANE_WIDTH, groundLevel, 0 }
+    -- World:AddChild(groundImageRight)
+    -- groundImageRight.Rotation = { math.pi * 0.5, 0, 0 }
 
-    yellowLineMiddle = webquad:create({
-        color = Color.White,
-        url = "https://files.cu.bzh/textures/asphalt-yellow-lines.png",
-    })
-    yellowLineMiddle.Width = 3
-    yellowLineMiddle.Height = BUILDING_FAR * 2
-    yellowLineMiddle.Tiling = { 1, tiling }
-    yellowLineMiddle.Anchor = { 0.5, 0.5 }
-    yellowLineMiddle.IsDoubleSided = false
-    yellowLineMiddle.Position = groundImage.Position + { 0, 0.1, 0 }
-    World:AddChild(yellowLineMiddle)
-    yellowLineMiddle.Rotation = { math.pi * 0.5, 0, 0 }
+    -- groundImageLeft = webquad:create({
+    --     color = Color.White,
+    --     url = "https://files.blip.game/textures/grass-with-path.jpg",
+    -- })
+    -- local tiling = BUILDING_FAR / 32
+    -- groundImageLeft.Width = LANE_WIDTH
+    -- groundImageLeft.Height = BUILDING_FAR * 2
+    -- groundImageLeft.Tiling = { tiling, tiling }
+    -- groundImageLeft.Anchor = { 0.5, 0.5 }
+    -- groundImageLeft.IsDoubleSided = false
+    -- groundImageLeft.Position = { -LANE_WIDTH, groundLevel, 0 }
+    -- World:AddChild(groundImageLeft)
+    -- groundImageLeft.Rotation = { math.pi * 0.5, 0, 0 }
 
-    yellowLineRight = webquad:create({
-        color = Color.White,
-        url = "https://files.cu.bzh/textures/asphalt-yellow-lines.png",
-    })
-    yellowLineRight.Width = 3
-    yellowLineRight.Height = BUILDING_FAR * 2
-    yellowLineRight.Tiling = { 1, tiling }
-    yellowLineRight.Anchor = { 0.5, 0.5 }
-    yellowLineRight.IsDoubleSided = false
-    yellowLineRight.Position = groundImage.Position + { LANE_WIDTH, 0.1, 0 }
-    World:AddChild(yellowLineRight)
-    yellowLineRight.Rotation = { math.pi * 0.5, 0, 0 }
 
     -- Create ground motion tracker object
     groundMotionTracker = Object()
@@ -561,7 +796,8 @@ Client.OnStart = function()
             trigger.Physics = PhysicsMode.Trigger
             local triggerBox = Box()
             triggerBox:Fit(wrapper, { recurse = true, localBox = true})
-            triggerBox.Min.Y = triggerBox.Min.Y + 5  -- Start trigger a bit above ground
+            triggerBox.Min += Number3(0, 0, -8)
+            triggerBox.Max += Number3(0, 3, 0)
             trigger.CollisionBox = triggerBox
             wrapper:AddChild(trigger)
             trigger.CollisionGroups = nil
@@ -650,30 +886,47 @@ Client.OnStart = function()
         end
     end)
 
+
+    cliffPart = Quad()
+    cliffPart.Physics = PhysicsMode.Dynamic
+    cliffPart.Acceleration = -Config.ConstantAcceleration
+    cliffPart.CollisionGroups = nil
+    cliffPart.CollidesWithGroups = nil
+    cliffPart.Width = CLIFF_LENGTH
+    cliffPart.Height = 45
+    cliffPart.Color = Color(120, 200, 120)
+    cliffPart.Rotation = { math.rad(90), 0, 0}
+    assetsLoaded = assetsLoaded + 1
+    if assetsLoaded == totalAssets then
+        currentState = STATES.MENU
+    end
+    prepopulateCliffPool(10)
+
     -- load cliff slope asset
-    HTTP:Get("https://files.blip.game/gltf/kenney/cliff-slope.glb", function(response)
-        if response.StatusCode == 200 then
-            local req = Object:Load(response.Body, function(o)
-                cliffPart = wrapMesh(o, Number3(CLIFF_LENGTH, 45, 35), "cliff")
-                o.Material = {
-                    albedo = Color(120, 200, 120),
-                }
-                --print("Cliff part loaded.")
-                assetsLoaded = assetsLoaded + 1
+    -- HTTP:Get("https://files.blip.game/gltf/kenney/cliff-slope.glb", function(response)
+    --     if response.StatusCode == 200 then
+    --         local req = Object:Load(response.Body, function(o)
+    --             cliffPart = wrapMesh(o, Number3(CLIFF_LENGTH, 45, 35), "cliff")
+    --             o.Material = {
+    --                 albedo = Color(120, 200, 120),
+    --             }
+    --             --print("Cliff part loaded.")
+    --             assetsLoaded = assetsLoaded + 1
                 
-                -- Prepopulate the cliff pool after cliff asset is loaded
-                prepopulateCliffPool(10)  -- Start with 20 cliffs in the pool
+    --             -- Prepopulate the cliff pool after cliff asset is loaded
+    --             prepopulateCliffPool(10)  -- Start with 20 cliffs in the pool
                 
-                if assetsLoaded == totalAssets then
-                    currentState = STATES.MENU
-                end
-            end)
-        end
-    end)
+    --             if assetsLoaded == totalAssets then
+    --                 currentState = STATES.MENU
+    --             end
+    --         end)
+    --     end
+    -- end)
 
     -- Create modern UI panels
     createTopRightScore()
     createNewHighScoreText()
+    createTutorialText()
     
     -- Load high score with callback
     function loadHighScore()
@@ -718,15 +971,25 @@ Client.OnStart = function()
     }
 
     Player.OnCollisionBegin = function(self, other, normal)
-        -- ignore collisions with the ground
+        -- Check for landing sound when player hits ground from above
+        if normal.Y > 0.5 and currentState == STATES.RUNNING then
+            -- Player is landing on ground - use grass sound
+            if Player.Position.Y <= 41 then
+                sfx("walk_grass_1", { Volume = 0.4, Pitch = 2.5, Spatialized = false })
+                -- Reset footstep timer when landing
+                footstepTimer = 0
+            end
+        end
         
         if other.Physics == PhysicsMode.Trigger or other.Physics == PhysicsMode.Static then
             if other.Parent ~= nil then
                 -- Check if this is a stairs trigger
                 local parent = other.Parent
                 if obstaclesByRef[parent] == "stairs" then
-                    -- Give the player a boost up and forward
-                    Player.Motion.Y = gameSpeed * STAIRS_BOOST_MULTIPLIER  -- Upward boost
+                    -- Give the player a boost up and forward, scaled by current game speed
+                    -- At higher speeds, we need a stronger boost to clear obstacles
+                    local boostStrength = gameSpeed * STAIRS_BOOST_MULTIPLIER
+                    Player.Motion.Y = boostStrength  -- Upward boost
                     return
                 end
                 other = parent
@@ -739,12 +1002,36 @@ Client.OnStart = function()
         
         local obstacleType = obstaclesByRef[other]
         
-        -- For all obstacles, use the original logic
-        if isSlowDownActive and normal.Y == 0 or normal.Z < 0 then
+        -- Don't kill player if they hit stairs (even from front)
+        if obstacleType == "stairs" then
+            return
+        end
+        
+        -- Check for front collision (always fatal)
+        if normal.Z < 0 then
+            -- Play collision sound based on obstacle type
+            if obstacleType == "log" then
+                sfx("wood_impact_5", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+            else
+                sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+            end
             gameOver()
             return
         end
-        -- hit block from the right
+        
+        -- Check if player is already flashing and hits from side
+        if isSlowDownActive and normal.Y == 0 then
+            -- Play collision sound based on obstacle type
+            if obstacleType == "log" then
+                sfx("wood_impact_5", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+            else
+                sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+            end
+            gameOver()
+            return
+        end
+        
+        -- hit block from the side (first hit)
         if normal.Y == 0 then
             if normal.X < 0 then
                 targetLane -= 1  
@@ -754,6 +1041,13 @@ Client.OnStart = function()
             end
             isSlowDownActive = true
             slowDownTimer = SLOW_DOWN_DURATION
+            
+            -- Play collision sound based on obstacle type
+            if obstacleType == "log" then
+                sfx("wood_impact_5", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+            else
+                sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+            end
         end
     end
 
@@ -817,20 +1111,37 @@ Client.OnStart = function()
             cliff:AddChild(tree)
             tree.Name = "tree"  -- Give trees a name for identification
             tree.Pivot = {tree.Width * 0.5, 0, tree.Depth * 0.5}
-            tree.LocalPosition = Number3(x, 16, 0)
+            tree.LocalPosition = Number3(x, 16, 5)
             tree.Scale = Number3(1, 1, 0.7)
             tree.CollisionGroups = nil
             tree.CollidesWithGroups = nil
             tree.Physics = PhysicsMode.Disabled
             tree.Shadow = true
+            -- Counter-rotate the tree to stand upright despite cliff rotation
+            tree.LocalRotation = Number3(-math.pi/6, 0, 0)
         end
     end
 end
 
 function updateSegments(gameProgress)
     -- Don't spawn obstacles if assets aren't loaded yet
-    if logPart == nil or wallPart == nil or flagPart == nil or stairsPart == nil then
+    if assetsLoaded < totalAssets then
         return
+    end
+    
+    -- During tutorial, only clean up cliffs, let normal cleanup run for everything else
+    if TUTORIAL_ENABLED and tutorialStarted and not tutorialCompleted then
+        for obstacle, type in pairs(obstaclesByRef) do
+            if type == "cliff" and obstacle and obstacle.Parent and obstacle.Position.Z < -CLEANUP_DISTANCE then
+                World:RemoveChild(obstacle)
+                obstacle.IsHidden = true
+                if obstaclePools.cliff then
+                    table.insert(obstaclePools.cliff, obstacle)
+                end
+                obstaclesByRef[obstacle] = nil
+            end
+        end
+        -- Do NOT return here; let normal cleanup logic run for flags and other obstacles
     end
     
     -- Reset lane trackers if lastSpawnZ is too far behind the current progress
@@ -840,13 +1151,11 @@ function updateSegments(gameProgress)
         end
     end
     
-    -- Check if we need to spawn new obstacles
-    local currentSpawnZ = gameProgress + SPAWN_DISTANCE
+    -- Always spawn obstacles (with offset)
+    local currentSpawnZ = gameProgress + SPAWN_DISTANCE + OBSTACLE_SPAWN_Z_OFFSET
     local spawnCount = 0  -- Limit spawning to prevent memory issues
-    
-    while currentSpawnZ < gameProgress + MAX_SPAWN_DISTANCE and spawnCount < MAX_SPAWNS_PER_FRAME do
+    while currentSpawnZ < gameProgress + MAX_SPAWN_DISTANCE + OBSTACLE_SPAWN_Z_OFFSET and spawnCount < MAX_SPAWNS_PER_FRAME do
         local newObstacles = spawnObstaclesAtPosition(currentSpawnZ)
-        
         if newObstacles and #newObstacles > 0 then
             -- Create a segment entry for tracking
             local segment = {
@@ -856,21 +1165,22 @@ function updateSegments(gameProgress)
             table.insert(segments, segment)
             spawnCount = spawnCount + #newObstacles
         end
-        
         currentSpawnZ = currentSpawnZ + SPAWN_SPACING  -- Increased spacing to reduce spawn frequency
     end
 
     -- Additional cleanup: remove any obstacles that are too far behind
-    for obstacle, _ in pairs(obstaclesByRef) do
-        if obstacle and obstacle.Parent and obstacle.Position.Z < -CLEANUP_DISTANCE then
+    for obstacle, type in pairs(obstaclesByRef) do
+        local cleanupZ = -CLEANUP_DISTANCE
+        if type == "flag" then
+            cleanupZ = -120
+        elseif type == "cliff" then
+            cleanupZ = -120  -- Keep cliffs visible longer
+        end
+        if obstacle and obstacle.Parent and obstacle.Position.Z < cleanupZ then
             World:RemoveChild(obstacle)
             obstacle.IsHidden = true
-            local type = obstaclesByRef[obstacle]
             if type and obstaclePools[type] then
                 table.insert(obstaclePools[type], obstacle)
-                if type == "cliff" then
-                    --activeCliffCount -= 1  -- Decrement active count
-                end
             end
             -- Remove from segments
             for _, segment in ipairs(segments) do
@@ -970,6 +1280,14 @@ function spawnObstacle(obstacleType, lane, zPosition)
         return nil
     end
     obstaclesByRef[obstacle] = obstacleType
+    if obstacleType == "cliff" then
+        --print("Added cliff to obstaclesByRef, total cliffs: " .. (function() local count = 0; for _, type in pairs(obstaclesByRef) do if type == "cliff" then count = count + 1 end end; return count end)())
+        -- Ensure cliff has proper physics setup
+        obstacle.Physics = PhysicsMode.Dynamic
+        obstacle.Mass = 1000
+        obstacle.Friction = 0
+        obstacle.Acceleration = -Config.ConstantAcceleration
+    end
     setObstaclePosition(obstacle, lane, zPosition)
     obstacle.Mass = 1000
     if currentState == STATES.RUNNING then
@@ -1164,88 +1482,23 @@ end
 
 -- Add a helper to update all cliff motions
 function updateCliffMotion(newSpeed)
+    local cliffCount = 0
     for obstacle, type in pairs(obstaclesByRef) do
         if type == "cliff" then
             obstacle.Motion.Z = -newSpeed
+            cliffCount = cliffCount + 1
+            if cliffCount == 1 then
+               -- print("Cliff position: " .. obstacle.Position.Z .. ", Motion.Z: " .. obstacle.Motion.Z)
+            end
         end
+    end
+    if cliffCount > 0 then
+        --print("Updated " .. cliffCount .. " cliffs with speed: " .. newSpeed)
     end
 end
 
-Client.Tick = function(dt)
-    if currentState == STATES.LOADING then
-        return
-    end
-
-    if currentState == STATES.MENU then
-        -- In menu state, just spawn initial segments
-        updateSegments(gameProgress)
-        return
-    end
-
-    if currentState == STATES.READY then
-        -- Update UI in ready state
-        updateScoreDisplay(score)
-        
-        -- Spawn segments but don't update score or move obstacles
-        updateSegments(gameProgress)
-        return
-    end
-
-    if isGameOver then return end
-    
-    -- Update game progress based on time and game speed
-    gameProgress = gameProgress + (gameSpeed * dt)
-    
-    -- Update difficulty over time (only when game is running)
-    if currentState == STATES.RUNNING then
-        leaderboardUI:hide()
-        gameTime = gameTime + dt
-        difficultyMultiplier = math.min(MAX_DIFFICULTY_MULTIPLIER, 1.0 + (DIFFICULTY_INCREASE_RATE * gameTime))
-        gameSpeed = NORMAL_GAME_SPEED * difficultyMultiplier
-    end
-    
-    updateScore(dt)
-    updateScoreDisplay(score)
-    updateCrouch(dt)  -- Update crouch timer
-
-    if isSlowDownActive then
-        slowDownTimer -= dt
-        Player.Animations.Walk.Speed = ANIMATION_SPEED * SLOW_DOWN_MULTIPLIER
-        gameSpeed = NORMAL_GAME_SPEED * SLOW_DOWN_MULTIPLIER
-        updateObstacleSpeed(gameSpeed)
-        updateCliffMotion(gameSpeed)
-        if slowDownTimer <= 0 then
-            isSlowDownActive = false
-            gameSpeed = NORMAL_GAME_SPEED * difficultyMultiplier  -- Use current difficulty multiplier
-            Player.Animations.Walk.Speed = ANIMATION_SPEED
-            Player.Animations.Walk:Play()  -- Ensure walk animation is playing
-            updateObstacleSpeed(gameSpeed)
-            updateCliffMotion(gameSpeed)
-        end
-    end
-
-    updateSegments(gameProgress)
-    groundMotionTracker.Motion.Z = -gameSpeed
-
-    -- Calculate offset based on position delta
-    local dz = groundMotionTracker.Position.Z - (groundMotionLastZ or 0)
-    groundMotionLastZ = groundMotionTracker.Position.Z
-    -- Use dz to update groundImage and yellow line offsets
-    groundImage.Offset.Y = groundImage.Offset.Y + dz * GROUND_MOTION_MULTIPLIER
-    yellowLineLeft.Offset.Y = yellowLineLeft.Offset.Y + dz * GROUND_MOTION_MULTIPLIER
-    yellowLineMiddle.Offset.Y = yellowLineMiddle.Offset.Y + dz * GROUND_MOTION_MULTIPLIER
-    yellowLineRight.Offset.Y = yellowLineRight.Offset.Y + dz * GROUND_MOTION_MULTIPLIER
-
-    if isMoving then
-        targetLane = math.max(-1, math.min(1, targetLane))
-        targetPosition = lanePositions[targetLane + 2]
-        Player.Velocity.X = (targetPosition.X - Player.Position.X) * LANE_MOVEMENT_SPEED * dt
-        if math.abs(targetPosition.X - Player.Position.X) < LANE_MOVEMENT_THRESHOLD then
-            currentLane = targetLane
-            isMoving = false
-        end
-    end
-
+-- Add this function after updateCliffMotion or near other update functions
+function updateCliffs()
     local function getActiveCliffCountAndFurthestZ()
         local count = 0
         local maxZ = 0
@@ -1261,27 +1514,339 @@ Client.Tick = function(dt)
     end
 
     local count, furthestZ = getActiveCliffCountAndFurthestZ()
+    if TUTORIAL_ENABLED and tutorialStarted and not tutorialCompleted then
+        --print("Tutorial cliffs - count: " .. count .. ", furthestZ: " .. furthestZ .. ", MAX_ACTIVE_CLIFFS: " .. MAX_ACTIVE_CLIFFS)
+    end
     while count < MAX_ACTIVE_CLIFFS do
         local spawnZ = (count == 0 and 0) or (furthestZ + CLIFF_SPAWN_INTERVAL)
-        local cliffRight = spawnObstacle("cliff", 2.1, spawnZ)
-        local cliffLeft = spawnObstacle("cliff", -2.1, spawnZ)
+        if TUTORIAL_ENABLED and tutorialStarted and not tutorialCompleted then
+            --print("Attempting to spawn cliffs at Z: " .. spawnZ .. " (count: " .. count .. ")")
+        end
+        local cliffRight = spawnObstacle("cliff", 1.8, spawnZ)
+        local cliffLeft = spawnObstacle("cliff", -1.8, spawnZ)
         if cliffRight and cliffLeft then
-            cliffRight.Rotation = Number3(0, math.pi/2, 0)
-            cliffLeft.Rotation = Number3(0, -math.pi/2, 0)
+            cliffRight.Rotation = Number3(math.pi/6, math.pi/2, 0)
+            cliffLeft.Rotation = Number3(math.pi/6, -math.pi/2, 0)
             if currentState == STATES.RUNNING then
                 cliffRight.Motion.Z = -gameSpeed
                 cliffLeft.Motion.Z = -gameSpeed
+            else
+                cliffRight.Motion.Z = 0
+                cliffLeft.Motion.Z = 0
             end
             spawnTreesOnCliff(cliffRight)
             spawnTreesOnCliff(cliffLeft)
             count = count + 2
             furthestZ = spawnZ
-           --wned cliffs at Z: " .. spawnZ .. ", Pool size: " .. #obstaclePools.cliff .. ", Active cliffs: " .. count)
+            if TUTORIAL_ENABLED and tutorialStarted and not tutorialCompleted then
+                --print("Successfully spawned tutorial cliffs at Z: " .. spawnZ)
+            end
         else
+            if TUTORIAL_ENABLED and tutorialStarted and not tutorialCompleted then
+                --print("Failed to spawn cliffs at Z: " .. spawnZ)
+            end
             break
         end
     end
 end
+
+-- Tutorial functions
+function startTutorial()
+    if not TUTORIAL_ENABLED then
+        return
+    end
+    
+    tutorialStarted = true
+    tutorialState = 1
+    
+    -- Spawn all tutorial obstacles at once
+    spawnTutorialWalls()
+    spawnTutorialLogs()
+    spawnTutorialFlags()
+    if IsMobile then
+        showTutorialText("Swipe left and right to switch lanes")
+    else
+        showTutorialText("Press the right or left key to switch lanes")
+    end
+end
+
+function spawnTutorialWalls()
+    -- Spawn 3 walls in the middle lane
+    for i = 1, 3 do
+        local wallZ = TUTORIAL_WALL_Z + (i - 1) * WALL_SPACING
+        local wall = spawnObstacle("wall", 0, wallZ)  -- 0 = center lane
+        if wall then
+            table.insert(tutorialObstacles, wall)
+            if currentState == STATES.RUNNING then
+                wall.Motion.Z = -gameSpeed
+            else
+                wall.Motion.Z = 0
+            end
+        end
+    end
+end
+
+function spawnTutorialLogs()
+    -- Spawn logs in all three lanes
+    for lane = -1, 1 do
+        local log = spawnObstacle("log", lane, TUTORIAL_LOG_Z)
+        if log then
+            table.insert(tutorialObstacles, log)
+            if currentState == STATES.RUNNING then
+                log.Motion.Z = -gameSpeed
+            else
+                log.Motion.Z = 0
+            end
+        end
+    end
+end
+
+function spawnTutorialFlags()
+    -- Spawn flags in all three lanes
+    for lane = -1, 1 do
+        local flag = spawnObstacle("flag", lane, TUTORIAL_FLAG_Z)
+        if flag then
+            --print("Spawned flag in lane " .. lane .. " at Z: " .. flag.Position.Z)
+            table.insert(tutorialObstacles, flag)
+            if currentState == STATES.RUNNING then
+                flag.Motion.Z = -gameSpeed
+            else
+                flag.Motion.Z = 0
+            end
+        else
+            print("Failed to spawn flag in lane " .. lane)
+        end
+    end
+end
+
+function updateTutorial()
+    if not TUTORIAL_ENABLED or not tutorialStarted or tutorialCompleted then
+        return
+    end
+    
+    -- Check if tutorial obstacles have moved behind the player (Z < 0)
+    local wallsPassed = false
+    local logsPassed = false
+    local flagsPassed = false
+    
+    -- Check if walls have passed the player
+    for _, obstacle in ipairs(tutorialObstacles) do
+        if obstaclesByRef[obstacle] == "wall" and obstacle.Position.Z < 0 then
+            wallsPassed = true
+            break
+        end
+    end
+    
+    -- Check if logs have passed the player
+    for _, obstacle in ipairs(tutorialObstacles) do
+        if obstaclesByRef[obstacle] == "log" and obstacle.Position.Z < 0 then
+            logsPassed = true
+            break
+        end
+    end
+    
+    -- Check if flags have passed the player
+    for _, obstacle in ipairs(tutorialObstacles) do
+        if obstaclesByRef[obstacle] == "flag" and obstacle.Position.Z < 0 then
+            flagsPassed = true
+            --print("Flag passed player at Z: " .. obstacle.Position.Z)
+            break
+        end
+    end
+    
+    if tutorialState == 1 then
+        -- Check if player moved left or right from center lane
+        if currentLane ~= 0 then
+            -- Player moved left or right, but keep text until walls pass
+            if wallsPassed then
+                tutorialState = 2
+                hideTutorialText()
+                if IsMobile then
+                    showTutorialText("Swipe up to jump")
+                else
+                    showTutorialText("Press the up key to jump")
+                end
+            end
+        elseif wallsPassed then
+            -- Player passed walls without moving, force them to move
+            tutorialState = 2
+            hideTutorialText()
+            if IsMobile then
+                showTutorialText("Swipe up to jump")
+            else
+                showTutorialText("Press the up key to jump")
+            end
+        end
+    elseif tutorialState == 2 then
+        if not Player.IsOnGround then
+            if logsPassed then
+                tutorialState = 3
+                hideTutorialText()
+                if IsMobile then
+                    showTutorialText("Swipe down to crouch")
+                else
+                    showTutorialText("Press the down key to crouch")
+                end
+            end
+        elseif logsPassed then
+            tutorialState = 3
+            hideTutorialText()
+            if IsMobile then
+                showTutorialText("Swipe down to crouch")
+            else
+                showTutorialText("Press the down key to crouch")
+            end
+        end
+    elseif tutorialState == 3 then
+        -- Check if player crouched
+        local allFlagsBehind = true
+        for _, obstacle in ipairs(tutorialObstacles) do
+            if obstaclesByRef[obstacle] == "flag" and obstacle.Position.Z > -TUTORIAL_END_BUFFER then
+                allFlagsBehind = false
+                break
+            end
+        end
+        --print("Tutorial State 3 - flagsPassed: " .. tostring(flagsPassed) .. ", allFlagsBehind: " .. tostring(allFlagsBehind) .. ", isCrouching: " .. tostring(isCrouching))
+        if isCrouching then
+            if flagsPassed and allFlagsBehind then
+                --print("Tutorial completing - player crouched and flags passed!")
+                tutorialState = 4
+                hideTutorialText()
+                tutorialCompleted = true
+                cleanupTutorialObstacles()
+            end
+        elseif flagsPassed and allFlagsBehind then
+            --print("Tutorial completing - flags passed without crouching!")
+            tutorialState = 4
+            hideTutorialText()
+            tutorialCompleted = true
+            TUTORIAL_ENABLED = false
+            OBSTACLE_SPAWN_Z_OFFSET = 0
+            print("Tutorial ended!")
+                local store = KeyValueStore(Player.UserID)
+                store:Set("tutorial_completed", true, function(success) 
+                    if success then
+                        --print("Tutorial completed saved")
+                    else
+                        --print("Tutorial completed not saved")
+                    end
+                end)
+            cleanupTutorialObstacles()
+        end
+    end
+end
+
+function cleanupTutorialObstacles()
+    for _, obstacle in ipairs(tutorialObstacles) do
+        if obstacle and obstacle.Parent then
+            World:RemoveChild(obstacle)
+            obstacle.IsHidden = true
+            local type = obstaclesByRef[obstacle]
+            if type and obstaclePools[type] then
+                table.insert(obstaclePools[type], obstacle)
+            end
+            obstaclesByRef[obstacle] = nil
+        end
+    end
+    tutorialObstacles = {}
+end
+
+Client.Tick = function(dt)
+    if currentState == STATES.LOADING then
+        return
+    end
+
+    if currentState == STATES.MENU then
+        -- In menu state, just spawn initial segments
+        updateSegments(gameProgress)
+        updateCliffs()
+        return
+    end
+
+    if currentState == STATES.READY then
+        -- Update UI in ready state
+        updateScoreDisplay(score)
+        -- Spawn segments but don't update score or move obstacles
+        updateSegments(gameProgress)
+        updateCliffs()
+        return
+    end
+
+    if isGameOver then 
+        -- Handle leaderboard timer even when game is over
+        if showLeaderboardTimer > 0 then
+            showLeaderboardTimer = showLeaderboardTimer - dt
+            if showLeaderboardTimer <= 0 then
+                leaderboardUI:show()
+            end
+        end
+        return 
+    end
+    
+    -- Update game progress based on time and game speed
+    gameProgress = gameProgress + (gameSpeed * dt)
+    
+    -- Update difficulty over time (only when game is running)
+    if currentState == STATES.RUNNING then
+        leaderboardUI:hide()
+        gameTime = gameTime + dt
+        difficultyMultiplier = math.min(MAX_DIFFICULTY_MULTIPLIER, 1.0 + (DIFFICULTY_INCREASE_RATE * gameTime))
+        gameSpeed = NORMAL_GAME_SPEED * difficultyMultiplier
+    end
+    
+    updateScore(dt)
+    updateScoreDisplay(score)
+    updateCrouch(dt)  -- Update crouch timer
+    updateFootsteps(dt)  -- Update footstep sounds
+    updateFlashing(dt)  -- Update flashing effect
+
+    if isSlowDownActive then
+        slowDownTimer -= dt
+        if slowDownTimer <= 0 then
+            isSlowDownActive = false
+        end
+    end
+
+    updateSegments(gameProgress)
+    updateObstacleSpeed(gameSpeed)
+    updateCliffMotion(gameSpeed)
+    updateCliffs()
+    groundMotionTracker.Motion.Z = -gameSpeed
+
+    -- Update tutorial
+    updateTutorial()
+    
+    -- Update tutorial obstacle speeds and cliff motion
+    if TUTORIAL_ENABLED and tutorialStarted and not tutorialCompleted then
+        for _, obstacle in ipairs(tutorialObstacles) do
+            if obstacle and obstacle.Parent then
+                obstacle.Motion.Z = -gameSpeed
+            end
+        end
+        -- Also update cliff motion during tutorial
+        updateCliffMotion(gameSpeed)
+        --print("Tutorial active - updating cliff motion with speed: " .. gameSpeed)
+    end
+
+    -- Calculate offset based on position delta
+    local dz = groundMotionTracker.Position.Z - (groundMotionLastZ or 0)
+    groundMotionLastZ = groundMotionTracker.Position.Z
+    -- Use dz to update groundImage and yellow line offsets
+    groundImageMiddle.Offset.Y = groundImageMiddle.Offset.Y + dz * GROUND_MOTION_MULTIPLIER
+    -- groundImageRight.Offset.Y = groundImageRight.Offset.Y + dz * GROUND_MOTION_MULTIPLIER
+    -- groundImageLeft.Offset.Y = groundImageLeft.Offset.Y + dz * GROUND_MOTION_MULTIPLIER
+
+    if isMoving then
+        targetLane = math.max(-1, math.min(1, targetLane))
+        targetPosition = lanePositions[targetLane + 2]
+        Player.Velocity.X = (targetPosition.X - Player.Position.X) * LANE_MOVEMENT_SPEED * dt
+        if math.abs(targetPosition.X - Player.Position.X) < LANE_MOVEMENT_THRESHOLD then
+            currentLane = targetLane
+            isMoving = false
+        end
+    end
+end
+
 
 
 
