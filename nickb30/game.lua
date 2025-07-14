@@ -3,7 +3,7 @@ Modules = {
     controls = "controls",
     ease = "ease",
     ui = "uikit",
-    webquad = "github.com/aduermael/modzh/webquad:7fbc37d",
+    webquad = "github.com/aduermael/modzh/webquad:cc6dda1",
     niceleaderboard = "github.com/aduermael/modzh/niceleaderboard:47c44c8",
 }
     
@@ -18,7 +18,7 @@ Config.Items = {
 Config.ConstantAcceleration *= 2
 
 -- CONSTANTS
-local GROUND_MOTION_MULTIPLIER = 1/1536  -- NEEDS UPDATED VALUE
+local GROUND_MOTION_MULTIPLIER = 1/384  -- NEEDS UPDATED VALUE
 local JUMP_STRENGTH = 150
 local SCORE_PER_SECOND = 100
 local ANIMATION_SPEED = 1.5
@@ -33,7 +33,7 @@ local SWIPE_THRESHOLD = 10  -- Minimum distance for swipe detection
 local GROUND_OFFSET = 0.1  -- Height offset for obstacles above ground
 local WALL_SPACING = 50  -- Distance between walls in a train
 local SPAWN_DISTANCE = 200  -- Distance ahead of current progress to spawn obstacles
-local MAX_SPAWN_DISTANCE = 400  -- Maximum distance to spawn obstacles ahead
+local MAX_SPAWN_DISTANCE = 300  -- Maximum distance to spawn obstacles ahead
 local SPAWN_SPACING = 50  -- Spacing between spawn attempts
 local MAX_SPAWNS_PER_FRAME = 10  -- Maximum obstacles to spawn per frame
 local CLEANUP_DISTANCE = 80 -- Distance behind player to clean up obstacles
@@ -146,6 +146,11 @@ local isFlashing = false
 local showLeaderboardTimer = 0  -- Timer for showing leaderboard after game over
 
 local OBSTACLE_SPAWN_Z_OFFSET = 850
+
+-- Table to track obstacles that are animating upwards
+local obstacleAnimations = {}  -- { [obstacle] = { targetY = number, duration = number, elapsed = number, startY = number } }
+local OBSTACLE_SPAWN_ANIMATION_OFFSET = 20  -- How far below ground to start
+local OBSTACLE_SPAWN_ANIMATION_DURATION = 0.3  -- Animation duration in seconds
 
 local function createTopRightScore()
     -- Create score text in top-right corner
@@ -313,8 +318,7 @@ function gameOver()
             obstacle.Motion.Z = 0
         end
     end
-    -- Show leaderboard UI when game is over
-    -- add a 2 second delay before showing the leaderboard
+    -- Show leaderboard UI and restart button after a delay
     showLeaderboardTimer = 2
     -- Hide the score text in top-right
     if scoreText then 
@@ -335,7 +339,7 @@ function gameOver()
         newHighScoreText.Text = "FINAL SCORE: " .. string.format("%.0f", score)
         newHighScoreText.parentDidResize()
     end
-    if restartButton then restartButton:show() end
+    if restartButton then restartButton:hide() end
     if startButton then startButton:hide() end
 end
 
@@ -673,13 +677,15 @@ Client.OnStart = function()
     leaderboardUI:reload()
 
     -- ground texture
+    -- 256 x 384
     groundImageMiddle = webquad:create({
         color = Color.White,
-        url = "https://files.blip.game/textures/grass-with-path.jpg",
+        url = "https://files.blip.game/textures/grass-with-path-2.jpg",
+        filtering = false,
     })
     groundImageMiddle.Width = LANE_WIDTH * 5
     groundImageMiddle.Height = BUILDING_FAR * 2
-    tilingY = groundImageMiddle.Height / 1536
+    tilingY = groundImageMiddle.Height / 384
     groundImageMiddle.Tiling = { 5, tilingY }
     groundImageMiddle.Anchor = { 0.5, 0.5 }
     groundImageMiddle.IsDoubleSided = false
@@ -1352,7 +1358,15 @@ function setObstaclePosition(obstacle, lane, zPosition)
     if obstaclesByRef[obstacle] == "log" then
         y += 3
     end
-    obstacle.Position = Number3(lane * LANE_WIDTH, y, zPosition)
+    -- Always animate from below ground, even for recycled obstacles
+    local startY = y - OBSTACLE_SPAWN_ANIMATION_OFFSET
+    obstacle.Position = Number3(lane * LANE_WIDTH, startY, zPosition)
+    obstacleAnimations[obstacle] = {
+        targetY = y,
+        duration = OBSTACLE_SPAWN_ANIMATION_DURATION,
+        elapsed = 0,
+        startY = startY
+    }
 end
 
 -- Add at the top with other obstacle variables
@@ -1756,6 +1770,24 @@ Client.Tick = function(dt)
         return
     end
 
+    -- Animate obstacles rising from below ground
+    for obstacle, anim in pairs(obstacleAnimations) do
+        if obstacle and obstacle.Parent then
+            anim.elapsed = anim.elapsed + dt
+            local t = math.min(anim.elapsed / anim.duration, 1)
+            -- Ease out cubic for smoothness
+            local easeT = 1 - (1 - t) * (1 - t) * (1 - t)
+            local newY = anim.startY + (anim.targetY - anim.startY) * easeT
+            obstacle.Position.Y = newY
+            if t >= 1 then
+                obstacle.Position.Y = anim.targetY
+                obstacleAnimations[obstacle] = nil
+            end
+        else
+            obstacleAnimations[obstacle] = nil
+        end
+    end
+
     if currentState == STATES.MENU then
         -- In menu state, just spawn initial segments
         updateSegments(gameProgress)
@@ -1778,6 +1810,7 @@ Client.Tick = function(dt)
             showLeaderboardTimer = showLeaderboardTimer - dt
             if showLeaderboardTimer <= 0 then
                 leaderboardUI:show()
+                if restartButton then restartButton:show() end
             end
         end
         return 
