@@ -1158,9 +1158,20 @@ function updateSegments(gameProgress)
     end
     
     -- Always spawn obstacles (with offset)
-    local currentSpawnZ = gameProgress + SPAWN_DISTANCE + OBSTACLE_SPAWN_Z_OFFSET
     local spawnCount = 0  -- Limit spawning to prevent memory issues
-    while currentSpawnZ < gameProgress + MAX_SPAWN_DISTANCE + OBSTACLE_SPAWN_Z_OFFSET and spawnCount < MAX_SPAWNS_PER_FRAME do
+    -- Find the furthest cliff Z position
+    local furthestCliffZ = 0
+    for obstacle, type in pairs(obstaclesByRef) do
+        if type == "cliff" and obstacle.Parent and obstacle.Position.Z > furthestCliffZ then
+            furthestCliffZ = obstacle.Position.Z
+        end
+    end
+    -- Calculate spawn range - start from game progress + spawn distance, but don't exceed furthest cliff
+    local spawnStartZ = gameProgress + SPAWN_DISTANCE + OBSTACLE_SPAWN_Z_OFFSET
+    local spawnEndZ = math.min(gameProgress + MAX_SPAWN_DISTANCE + OBSTACLE_SPAWN_Z_OFFSET, furthestCliffZ)
+    
+    local currentSpawnZ = spawnStartZ
+    while currentSpawnZ < spawnEndZ and spawnCount < MAX_SPAWNS_PER_FRAME do
         local newObstacles = spawnObstaclesAtPosition(currentSpawnZ)
         if newObstacles and #newObstacles > 0 then
             -- Create a segment entry for tracking
