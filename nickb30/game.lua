@@ -18,7 +18,7 @@ Config.Items = {
 Config.ConstantAcceleration *= 2
 
 -- CONSTANTS
-local GROUND_MOTION_MULTIPLIER = 1/384  -- NEEDS UPDATED VALUE
+local GROUND_MOTION_MULTIPLIER = 4/384  -- NEEDS UPDATED VALUE
 local JUMP_STRENGTH = 150
 local SCORE_PER_SECOND = 100
 local ANIMATION_SPEED = 1.5
@@ -33,7 +33,7 @@ local SWIPE_THRESHOLD = 10  -- Minimum distance for swipe detection
 local GROUND_OFFSET = 0.1  -- Height offset for obstacles above ground
 local WALL_SPACING = 50  -- Distance between walls in a train
 local SPAWN_DISTANCE = 200  -- Distance ahead of current progress to spawn obstacles
-local MAX_SPAWN_DISTANCE = 300  -- Maximum distance to spawn obstacles ahead
+local MAX_SPAWN_DISTANCE = 400  -- Maximum distance to spawn obstacles ahead
 local SPAWN_SPACING = 50  -- Spacing between spawn attempts
 local MAX_SPAWNS_PER_FRAME = 10  -- Maximum obstacles to spawn per frame
 local CLEANUP_DISTANCE = 80 -- Distance behind player to clean up obstacles
@@ -73,6 +73,15 @@ local laneTrackers = {
     center = { lastSpawnZ = 0, minDistance = 100, wallTrainCount = 0, stairsSpawned = false }, -- Center lane (0)
     right = { lastSpawnZ = 0, minDistance = 100, wallTrainCount = 0, stairsSpawned = false }   -- Right lane (1)
 }
+
+-- Debug function to print lane tracker values
+local function printLaneTrackers()
+    print("=== LANE TRACKERS ===")
+    print("Left: lastSpawnZ=" .. laneTrackers.left.lastSpawnZ .. ", minDistance=" .. laneTrackers.left.minDistance)
+    print("Center: lastSpawnZ=" .. laneTrackers.center.lastSpawnZ .. ", minDistance=" .. laneTrackers.center.minDistance)
+    print("Right: lastSpawnZ=" .. laneTrackers.right.lastSpawnZ .. ", minDistance=" .. laneTrackers.right.minDistance)
+    print("====================")
+end
 
 -- Obstacle spawning probabilities and types
 local obstacleTypes = {
@@ -135,15 +144,18 @@ local tutorialCompleted = false
 local footstepTimer = 0
 local FOOTSTEP_INTERVAL = 0.33  -- Time between footsteps in seconds
 local lastPlayerOnGround = false
-local lastConcreteSound = 0  -- Track last concrete sound time for cooldown
-local lastConcreteLanding = 0  -- Track last concrete landing sound time for cooldown
-local lastConcreteTransition = nil  -- Track when player transitions to concrete
 
 -- Flashing effect variables
 local flashTimer = 0
 local FLASH_INTERVAL = 0.1  -- Time between flash toggles in seconds
 local isFlashing = false
 local showLeaderboardTimer = 0  -- Timer for showing leaderboard after game over
+
+-- Track last ground collider for footsteps
+local lastGroundCollider = nil
+
+-- Track last ground obstacle type for footsteps
+local lastGroundObstacleType = nil
 
 local OBSTACLE_SPAWN_Z_OFFSET = 850
 
@@ -353,6 +365,7 @@ end
 
 function startGame()
     print("Starting game...")
+    print("spawn offset: " .. OBSTACLE_SPAWN_Z_OFFSET)
     currentState = STATES.RUNNING
     leaderboardUI:hide()
     Player.Animations.Walk:Play()
@@ -532,10 +545,10 @@ function updateFootsteps(dt)
         if footstepTimer >= FOOTSTEP_INTERVAL then
             if Player.Position.Y > 41 then
                 -- Player is on top of a wall - use concrete sound for walking
-                sfx("walk_concrete_1", { Volume = 0.3, Pitch = 2.5, Spatialized = false })
+                sfx("walk_concrete_1", { Volume = 0.3, Pitch = 2.3 + math.random() * 0.2, Spatialized = false })
             else
                 -- Player is on ground - use grass sound for walking
-                sfx("walk_grass_1", { Volume = 0.4, Pitch = 2.5, Spatialized = false })
+                sfx("walk_grass_1", { Volume = 0.4, Pitch = 2.3 + math.random() * 0.2, Spatialized = false })
             end
             footstepTimer = footstepTimer % FOOTSTEP_INTERVAL  -- Use modulo instead of reset to 0
         end
@@ -547,19 +560,6 @@ function updateFootsteps(dt)
             end
             footstepTimer = 0
         end
-    end
-    
-    -- Play immediate sound when transitioning to concrete
-    if currentState == STATES.RUNNING and Player.IsOnGround and Player.Position.Y > 41 then
-        if not lastConcreteTransition or (os.clock() - lastConcreteTransition) > 0.1 then
-            if not lastConcreteTransition then
-                -- First time on concrete, play sound immediately
-                sfx("walk_concrete_1", { Volume = 0.3, Pitch = 2.5, Spatialized = false })
-            end
-            lastConcreteTransition = os.clock()
-        end
-    else
-        lastConcreteTransition = nil
     end
 end
 
@@ -645,13 +645,14 @@ Client.OnStart = function()
                 currentState = STATES.MENU
             end
             -- Move the tutorial completion check here, after everything is loaded
-            print("Tutorial completed: " .. tostring(tutorialCompleted))
+            --print("Tutorial completed: " .. tostring(tutorialCompleted))
             if tutorialCompleted then
                 OBSTACLE_SPAWN_Z_OFFSET = 0
                 TUTORIAL_ENABLED = false
-                print("Tutorial disabled due to previous completion")
+                --print("Tutorial disabled due to previous completion")
             end
-            print("KeyValueStore: " .. tostring(results.tutorial_completed))
+            --print("OBSTACLE_SPAWN_Z_OFFSET: " .. OBSTACLE_SPAWN_Z_OFFSET)
+            --print("KeyValueStore: " .. tostring(results.tutorial_completed))
         end
     end)
 
@@ -683,8 +684,9 @@ Client.OnStart = function()
         url = "https://files.blip.game/textures/grass-with-path-2.jpg",
         filtering = false,
     })
-    groundImageMiddle.Width = LANE_WIDTH * 5
-    groundImageMiddle.Height = BUILDING_FAR * 2
+    groundImageMiddle.Width = LANE_WIDTH * 5 * 4
+    groundImageMiddle.Height = BUILDING_FAR * 2 * 4
+    groundImageMiddle.Scale = 1/4
     tilingY = groundImageMiddle.Height / 384
     groundImageMiddle.Tiling = { 5, tilingY }
     groundImageMiddle.Anchor = { 0.5, 0.5 }
@@ -692,35 +694,6 @@ Client.OnStart = function()
     groundImageMiddle.Position = { 0, groundLevel, 0 }
     World:AddChild(groundImageMiddle)
     groundImageMiddle.Rotation = { math.pi * 0.5, 0, 0 }
-
-    -- groundImageRight = webquad:create({
-    --     color = Color.White,
-    --     url = "https://files.blip.game/textures/grass-with-path.jpg",
-    -- })
-    -- local tiling = BUILDING_FAR / 32
-    -- groundImageRight.Width = LANE_WIDTH
-    -- groundImageRight.Height = BUILDING_FAR * 2
-    -- groundImageRight.Tiling = { tiling, tiling }
-    -- groundImageRight.Anchor = { 0.5, 0.5 }
-    -- groundImageRight.IsDoubleSided = false
-    -- groundImageRight.Position = { LANE_WIDTH, groundLevel, 0 }
-    -- World:AddChild(groundImageRight)
-    -- groundImageRight.Rotation = { math.pi * 0.5, 0, 0 }
-
-    -- groundImageLeft = webquad:create({
-    --     color = Color.White,
-    --     url = "https://files.blip.game/textures/grass-with-path.jpg",
-    -- })
-    -- local tiling = BUILDING_FAR / 32
-    -- groundImageLeft.Width = LANE_WIDTH
-    -- groundImageLeft.Height = BUILDING_FAR * 2
-    -- groundImageLeft.Tiling = { tiling, tiling }
-    -- groundImageLeft.Anchor = { 0.5, 0.5 }
-    -- groundImageLeft.IsDoubleSided = false
-    -- groundImageLeft.Position = { -LANE_WIDTH, groundLevel, 0 }
-    -- World:AddChild(groundImageLeft)
-    -- groundImageLeft.Rotation = { math.pi * 0.5, 0, 0 }
-
 
     -- Create ground motion tracker object
     groundMotionTracker = Object()
@@ -892,42 +865,34 @@ Client.OnStart = function()
         end
     end)
 
-
-    cliffPart = Quad()
-    cliffPart.Physics = PhysicsMode.Dynamic
-    cliffPart.Acceleration = -Config.ConstantAcceleration
-    cliffPart.CollisionGroups = nil
-    cliffPart.CollidesWithGroups = nil
-    cliffPart.Width = CLIFF_LENGTH
-    cliffPart.Height = 45
-    cliffPart.Color = Color(120, 200, 120)
-    cliffPart.Rotation = { math.rad(90), 0, 0}
-    assetsLoaded = assetsLoaded + 1
-    if assetsLoaded == totalAssets then
-        currentState = STATES.MENU
+    -- function to create cliff part texture
+    -- edit this function to put the webquad into an object, and return the object
+    function createCliffPart()
+        local cliffObj = Object()
+        local quad = webquad:create({
+            url = "https://files.blip.game/textures/grass-tile.jpg",
+            filtering = false,
+        })
+        quad.Physics = PhysicsMode.Disabled
+        --quad.CollisionGroups = nil
+        --quad.CollidesWithGroups = nil
+        quad.Width = CLIFF_LENGTH * 4
+        quad.Height = 45 * 4
+        quad.Scale = 1/4
+        quad.Anchor = { 0.5, 0 }
+       -- quad.Rotation = { math.rad(90), 0, 0}
+        cliffObj:AddChild(quad)
+        cliffObj.Physics = PhysicsMode.Dynamic
+        cliffObj.Acceleration = -Config.ConstantAcceleration
+        cliffObj.CollisionGroups = nil
+        cliffObj.CollidesWithGroups = nil
+        assetsLoaded = assetsLoaded + 1
+        if assetsLoaded == totalAssets then
+            currentState = STATES.MENU
+        end
+        return cliffObj
     end
-    prepopulateCliffPool(10)
-
-    -- load cliff slope asset
-    -- HTTP:Get("https://files.blip.game/gltf/kenney/cliff-slope.glb", function(response)
-    --     if response.StatusCode == 200 then
-    --         local req = Object:Load(response.Body, function(o)
-    --             cliffPart = wrapMesh(o, Number3(CLIFF_LENGTH, 45, 35), "cliff")
-    --             o.Material = {
-    --                 albedo = Color(120, 200, 120),
-    --             }
-    --             --print("Cliff part loaded.")
-    --             assetsLoaded = assetsLoaded + 1
-                
-    --             -- Prepopulate the cliff pool after cliff asset is loaded
-    --             prepopulateCliffPool(10)  -- Start with 20 cliffs in the pool
-                
-    --             if assetsLoaded == totalAssets then
-    --                 currentState = STATES.MENU
-    --             end
-    --         end)
-    --     end
-    -- end)
+    prepopulateCliffPool(20)
 
     -- Create modern UI panels
     createTopRightScore()
@@ -958,6 +923,10 @@ Client.OnStart = function()
     -- Load the high score initially
     loadHighScore()
 
+    -- Debug: Print initial lane tracker values
+   -- print("Initial lane tracker values:")
+   -- printLaneTrackers()
+
     Player.Animations.Walk.Speed = ANIMATION_SPEED
     Player.Animations.Walk:Play()
     -- print("Initial Player.Scale.Y:", Player.Scale.Y)
@@ -979,11 +948,10 @@ Client.OnStart = function()
     Player.OnCollisionBegin = function(self, other, normal)
         -- Check for landing sound when player hits ground from above
         if normal.Y > 0.5 and currentState == STATES.RUNNING then
-            -- Player is landing on ground - use grass sound
-            if Player.Position.Y <= 41 then
-                sfx("walk_grass_1", { Volume = 0.4, Pitch = 2.5, Spatialized = false })
-                -- Reset footstep timer when landing
-                footstepTimer = 0
+            local obstacleType = obstaclesByRef[other]
+            if lastGroundObstacleType ~= obstacleType then
+                footstepTimer = FOOTSTEP_INTERVAL
+                lastGroundObstacleType = obstacleType
             end
         end
         
@@ -1058,6 +1026,10 @@ Client.OnStart = function()
     end
 
     Player.OnCollisionEnd = function(self, other, normal)
+        local obstacleType = obstaclesByRef[other]
+        if lastGroundObstacleType == obstacleType then
+            lastGroundObstacleType = nil
+        end
         if other.Physics == PhysicsMode.Trigger or other.Physics == PhysicsMode.Static then
             if other.Parent ~= nil then
                 -- Check if this is a stairs trigger
@@ -1117,8 +1089,8 @@ Client.OnStart = function()
             cliff:AddChild(tree)
             tree.Name = "tree"  -- Give trees a name for identification
             tree.Pivot = {tree.Width * 0.5, 0, tree.Depth * 0.5}
-            tree.LocalPosition = Number3(x, 16, 5)
             tree.Scale = Number3(1, 1, 0.7)
+            tree.LocalPosition = Number3(x, 16, 5)
             tree.CollisionGroups = nil
             tree.CollidesWithGroups = nil
             tree.Physics = PhysicsMode.Disabled
@@ -1151,38 +1123,34 @@ function updateSegments(gameProgress)
     end
     
     -- Reset lane trackers if lastSpawnZ is too far behind the current progress
+    --[[
     for _, tracker in pairs(laneTrackers) do
         if gameProgress - tracker.lastSpawnZ > MAX_SPAWN_DISTANCE then
             tracker.lastSpawnZ = gameProgress - MAX_SPAWN_DISTANCE + tracker.minDistance
         end
     end
-    
-    -- Always spawn obstacles (with offset)
-    local spawnCount = 0  -- Limit spawning to prevent memory issues
-    -- Find the furthest cliff Z position
+    ]]
+    -- get furthest Z position of cliffs
     local furthestCliffZ = 0
     for obstacle, type in pairs(obstaclesByRef) do
-        if type == "cliff" and obstacle.Parent and obstacle.Position.Z > furthestCliffZ then
+        if type == "cliff" and obstacle.Position.Z > furthestCliffZ then
             furthestCliffZ = obstacle.Position.Z
         end
     end
-    -- Calculate spawn range - start from game progress + spawn distance, but don't exceed furthest cliff
-    local spawnStartZ = gameProgress + SPAWN_DISTANCE + OBSTACLE_SPAWN_Z_OFFSET
-    local spawnEndZ = math.min(gameProgress + MAX_SPAWN_DISTANCE + OBSTACLE_SPAWN_Z_OFFSET, furthestCliffZ)
+    -- Always spawn obstacles (with offset)
+    local currentSpawnZ = gameProgress + SPAWN_DISTANCE + OBSTACLE_SPAWN_Z_OFFSET
+    currentSpawnZ = math.min(currentSpawnZ, furthestCliffZ + OBSTACLE_SPAWN_Z_OFFSET - 30)
     
-    local currentSpawnZ = spawnStartZ
-    while currentSpawnZ < spawnEndZ and spawnCount < MAX_SPAWNS_PER_FRAME do
-        local newObstacles = spawnObstaclesAtPosition(currentSpawnZ)
-        if newObstacles and #newObstacles > 0 then
-            -- Create a segment entry for tracking
-            local segment = {
-                zPosition = currentSpawnZ,
-                obstacles = newObstacles
-            }
-            table.insert(segments, segment)
-            spawnCount = spawnCount + #newObstacles
-        end
-        currentSpawnZ = currentSpawnZ + SPAWN_SPACING  -- Increased spacing to reduce spawn frequency
+    -- Spawn obstacles at the current position (no loop needed since this runs every frame)
+   --print("Attempting to spawn obstacles at Z: " .. currentSpawnZ)
+    local newObstacles = spawnObstaclesAtPosition(currentSpawnZ)
+    if newObstacles and #newObstacles > 0 then
+        -- Create a segment entry for tracking
+        local segment = {
+            zPosition = currentSpawnZ,
+            obstacles = newObstacles
+        }
+        table.insert(segments, segment)
     end
 
     -- Additional cleanup: remove any obstacles that are too far behind
@@ -1284,7 +1252,8 @@ function getPooledObstacle(obstacleType)
             return stairsPart:Copy({ includeChildren = true })
         elseif obstacleType == "cliff" and cliffPart then
             --print("Spawned new cliff (not recycled)")
-            return cliffPart:Copy({ includeChildren = true })
+            return createCliffPart()
+            -- cliffPart:Copy({ includeChildren = true })
         end
     end
     return nil
@@ -1298,8 +1267,6 @@ function spawnObstacle(obstacleType, lane, zPosition)
     end
     obstaclesByRef[obstacle] = obstacleType
     if obstacleType == "cliff" then
-        --print("Added cliff to obstaclesByRef, total cliffs: " .. (function() local count = 0; for _, type in pairs(obstaclesByRef) do if type == "cliff" then count = count + 1 end end; return count end)())
-        -- Ensure cliff has proper physics setup
         obstacle.Physics = PhysicsMode.Dynamic
         obstacle.Mass = 1000
         obstacle.Friction = 0
@@ -1324,6 +1291,7 @@ function spawnObstaclesAtPosition(zPosition)
     -- Lane obstacles
     for lane = -1, 1 do
         local tracker = getLaneTracker(lane)
+        --print("Can spawn in lane: " .. tostring(canSpawnInLane(lane, zPosition)))
         if tracker and canSpawnInLane(lane, zPosition) then
             local obstacleData = selectObstacleType()
             if wouldCreateImpossibleSegment(lane, obstacleData.type, zPosition) then
@@ -1347,7 +1315,8 @@ function spawnObstaclesAtPosition(zPosition)
                         table.insert(spawnedObstacles, wallObstacle)
                     end
                 end
-                tracker.lastSpawnZ = zPosition + ((trainLength - 1) * WALL_SPACING)
+                tracker.lastSpawnZ = zPosition + ((trainLength) * WALL_SPACING)
+                --print("Set lastSpawnZ to: " .. tracker.lastSpawnZ)
                 tracker.minDistance = obstacleData.minDistance
                 tracker.wallTrainCount = 0
             else
@@ -1355,6 +1324,7 @@ function spawnObstaclesAtPosition(zPosition)
                 if obstacle then
                     table.insert(spawnedObstacles, obstacle)
                     tracker.lastSpawnZ = zPosition
+                    --print("Set lastSpawnZ to: " .. tracker.lastSpawnZ)
                     tracker.minDistance = obstacleData.minDistance
                 end
             end
@@ -1395,14 +1365,14 @@ local activeCliffCount = 0
 
 -- Function to prepopulate the cliff pool
 function prepopulateCliffPool(poolSize)
-    if not cliffPart then
+    if not createCliffPart() then
         print("Cannot prepopulate cliff pool - cliffPart not loaded yet")
         return
     end
     
     --print("Prepopulating cliff pool with " .. poolSize .. " cliffs...")
     for i = 1, poolSize do
-        local cliff = cliffPart:Copy({ includeChildren = true })
+        local cliff = createCliffPart()
         cliff.IsHidden = true
         table.insert(obstaclePools.cliff, cliff)
     end
@@ -1420,6 +1390,28 @@ function getLaneTracker(lane)
     return nil
 end
 
+function updateLaneTrackerLastSpawnZ(lane)
+    local tracker = getLaneTracker(lane)
+    if not tracker then return end
+    
+    -- Find the furthest obstacle in this lane
+    local furthestZ = -math.huge
+    for obstacle, obstacleType in pairs(obstaclesByRef) do
+        if obstacle and obstacle.Parent and obstacleType ~= "cliff" then
+            -- Check if this obstacle is in the correct lane
+            local obstacleLane = math.round(obstacle.Position.X / LANE_WIDTH)
+            if obstacleLane == lane and obstacle.Position.Z > furthestZ then
+                furthestZ = obstacle.Position.Z
+            end
+        end
+    end
+    
+    -- If we found obstacles in this lane, update lastSpawnZ
+    if furthestZ > -math.huge then
+        tracker.lastSpawnZ = furthestZ
+    end
+end
+
 function canSpawnInLane(lane, currentZ)
     local tracker = getLaneTracker(lane)
     if not tracker then return false end
@@ -1429,7 +1421,11 @@ function canSpawnInLane(lane, currentZ)
         return true
     end
     
+    -- Update lastSpawnZ based on current obstacle positions
+    updateLaneTrackerLastSpawnZ(lane)
+    
     -- For non-wall train spawning, check minimum distance
+    --print("Current Z: " .. currentZ .. ", Last Spawn Z: " .. tracker.lastSpawnZ .. ", Min Distance: " .. tracker.minDistance)
     return (currentZ - tracker.lastSpawnZ) >= tracker.minDistance
 end
 
@@ -1491,12 +1487,14 @@ function clearSegments()
     end
     segments = {}
     -- Reset lane trackers
+   -- print("Resetting lane trackers in clearSegments()")
     laneTrackers.left.lastSpawnZ = 0
     laneTrackers.center.lastSpawnZ = 0
     laneTrackers.right.lastSpawnZ = 0
     laneTrackers.left.minDistance = 100
     laneTrackers.center.minDistance = 100
     laneTrackers.right.minDistance = 100
+    --printLaneTrackers()
     laneTrackers.left.wallTrainCount = 0
     laneTrackers.center.wallTrainCount = 0
     laneTrackers.right.wallTrainCount = 0
@@ -1748,14 +1746,25 @@ function updateTutorial()
             TUTORIAL_ENABLED = false
             OBSTACLE_SPAWN_Z_OFFSET = 0
             print("Tutorial ended!")
-                local store = KeyValueStore(Player.UserID)
-                store:Set("tutorial_completed", true, function(success) 
-                    if success then
-                        --print("Tutorial completed saved")
-                    else
-                        --print("Tutorial completed not saved")
-                    end
-                end)
+            
+                -- Reset lane trackers after tutorial ends so normal spawning can begin
+            print("Resetting lane trackers after tutorial end")
+            laneTrackers.left.lastSpawnZ = 0
+            laneTrackers.center.lastSpawnZ = 0
+            laneTrackers.right.lastSpawnZ = 0
+            laneTrackers.left.minDistance = 100
+            laneTrackers.center.minDistance = 100
+            laneTrackers.right.minDistance = 100
+            printLaneTrackers()
+            
+            local store = KeyValueStore(Player.UserID)
+            store:Set("tutorial_completed", true, function(success) 
+                if success then
+                    --print("Tutorial completed saved")
+                else
+                    --print("Tutorial completed not saved")
+                end
+            end)
             cleanupTutorialObstacles()
         end
     end
@@ -1800,8 +1809,7 @@ Client.Tick = function(dt)
     end
 
     if currentState == STATES.MENU then
-        -- In menu state, just spawn initial segments
-        updateSegments(gameProgress)
+        -- In menu state, just update cliffs (no obstacle spawning)
         updateCliffs()
         return
     end
@@ -1809,8 +1817,7 @@ Client.Tick = function(dt)
     if currentState == STATES.READY then
         -- Update UI in ready state
         updateScoreDisplay(score)
-        -- Spawn segments but don't update score or move obstacles
-        updateSegments(gameProgress)
+        -- Just update cliffs, don't spawn obstacles yet
         updateCliffs()
         return
     end
@@ -1875,10 +1882,8 @@ Client.Tick = function(dt)
     -- Calculate offset based on position delta
     local dz = groundMotionTracker.Position.Z - (groundMotionLastZ or 0)
     groundMotionLastZ = groundMotionTracker.Position.Z
-    -- Use dz to update groundImage and yellow line offsets
+    -- Use dz to update groundImage
     groundImageMiddle.Offset.Y = groundImageMiddle.Offset.Y + dz * GROUND_MOTION_MULTIPLIER
-    -- groundImageRight.Offset.Y = groundImageRight.Offset.Y + dz * GROUND_MOTION_MULTIPLIER
-    -- groundImageLeft.Offset.Y = groundImageLeft.Offset.Y + dz * GROUND_MOTION_MULTIPLIER
 
     if isMoving then
         targetLane = math.max(-1, math.min(1, targetLane))
@@ -1890,10 +1895,3 @@ Client.Tick = function(dt)
         end
     end
 end
-
-
-
-
-
-
-
