@@ -17,6 +17,12 @@ Config.Items = {
 --Dev.DisplayColliders = true
 Config.ConstantAcceleration *= 2
 
+local displayedColliders = {}
+function displayCollider(o)
+    table.insert(displayedColliders, o)
+    Dev.DisplayColliders = displayedColliders
+end
+
 -- CONSTANTS
 local GROUND_MOTION_MULTIPLIER = 4/384  -- NEEDS UPDATED VALUE
 local JUMP_STRENGTH = 150
@@ -37,7 +43,7 @@ local MAX_SPAWN_DISTANCE = 400  -- Maximum distance to spawn obstacles ahead
 local SPAWN_SPACING = 50  -- Spacing between spawn attempts
 local MAX_SPAWNS_PER_FRAME = 10  -- Maximum obstacles to spawn per frame
 local CLEANUP_DISTANCE = 80 -- Distance behind player to clean up obstacles
-local STAIRS_BOOST_MULTIPLIER = 3.0  -- Multiplier for stairs boost (increased for high speeds)
+local STAIRS_BOOST_MULTIPLIER = 1.3  -- Multiplier for stairs boost (increased for high speeds)
 local LANE_MOVEMENT_SPEED = 1000  -- Speed multiplier for lane movement
 local LANE_MOVEMENT_THRESHOLD = 0.01  -- Threshold for lane movement completion
 
@@ -65,6 +71,7 @@ local COLLISION_GROUPS = {
     COLLIDERS = CollisionGroups(3),
     COLLECTIBLES = CollisionGroups(4),
     PLAYER = CollisionGroups(5),
+    SLOPE = CollisionGroups(6),
 }
 
 -- Lane-based obstacle spawning system
@@ -129,9 +136,13 @@ local newHighScoreText = nil
 local newHighScorePanel = nil
 local currentState = STATES.LOADING
 local assetsLoaded = 0
-local totalAssets = 6  -- log, wall, flag, stairs, cliff, tutorial_completed
+local totalAssets = 7  -- log, wall, flag, stairs, cliff, tutorial_completed, tree
 local startButton = nil
 local restartButton = nil
+local musicButtonOn = nil
+local musicButtonOff = nil
+local gamesPlayed = 0
+local soundOn = true
 
 -- Tutorial state variables
 local tutorialState = 0  -- 0 = not started, 1 = walls, 2 = logs, 3 = flags, 4 = complete
@@ -151,11 +162,9 @@ local FLASH_INTERVAL = 0.1  -- Time between flash toggles in seconds
 local isFlashing = false
 local showLeaderboardTimer = 0  -- Timer for showing leaderboard after game over
 
--- Track last ground collider for footsteps
-local lastGroundCollider = nil
-
 -- Track last ground obstacle type for footsteps
 local lastGroundObstacleType = nil
+local isOnStairs = false
 
 local OBSTACLE_SPAWN_Z_OFFSET = 850
 
@@ -295,6 +304,14 @@ function dropPlayer()
     if leaderboardUI then leaderboardUI:show() end
     if startButton then startButton:show() end
     if restartButton then restartButton:hide() end
+    -- Don't reset music button state - preserve current sound setting
+    if soundOn then
+        if musicButtonOn then musicButtonOn:show() end
+        if musicButtonOff then musicButtonOff:hide() end
+    else
+        if musicButtonOn then musicButtonOn:hide() end
+        if musicButtonOff then musicButtonOff:show() end
+    end
 end
 
 function gameOver()
@@ -303,8 +320,14 @@ function gameOver()
         -- Reload the leaderboard UI after the score is submitted
         leaderboardUI:reload()
     end})
+    -- update games_played
+    local store = KeyValueStore(Player.UserID)
+    store:Set("games_played", gamesPlayed + 1, function(success) end)
+    gamesPlayed += 1
     isGameOver = true
-    sfx("death_scream_guy_4", { Volume = 0.5, Pitch = math.random() * 0.5 + 0.8, Spatialized = false })
+    if soundOn then
+        sfx("death_scream_guy_4", { Volume = 0.5, Pitch = math.random() * 0.5 + 0.8, Spatialized = false })
+    end
     print("Game Over")
     currentState = STATES.GAME_OVER
     Player.Animations.Walk:Stop()
@@ -467,10 +490,12 @@ function checkForObstacleCollisions()
                         Player.Position.Y = 0
                         
                         -- Play collision sound based on obstacle type
-                        if obstacleType == "log" then
-                            sfx("wood_impact_5", { Volume = 0.6, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
-                        else
-                            sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
+                        if soundOn then
+                            if obstacleType == "log" then
+                                sfx("wood_impact_5", { Volume = 0.6, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
+                            else
+                                sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
+                            end
                         end
                         
                         gameOver()
@@ -496,11 +521,15 @@ else
         if x == 1 then
             targetLane += 1
             isMoving = true
-            sfx("whooshes_small_1", { Volume = 0.5, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
+            if soundOn then
+                sfx("whooshes_small_1", { Volume = 0.4, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
+            end
         elseif x == -1 then
             targetLane -= 1
             isMoving = true
-            sfx("whooshes_small_1", { Volume = 0.5, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
+            if soundOn then
+                sfx("whooshes_small_1", { Volume = 0.4, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
+            end
         end
         if y == 1 then
             if Player.IsOnGround then
@@ -543,12 +572,14 @@ function updateFootsteps(dt)
         
         -- Play footstep sound at regular intervals
         if footstepTimer >= FOOTSTEP_INTERVAL then
-            if Player.Position.Y > 41 then
-                -- Player is on top of a wall - use concrete sound for walking
-                sfx("walk_concrete_1", { Volume = 0.3, Pitch = 2.3 + math.random() * 0.2, Spatialized = false })
-            else
-                -- Player is on ground - use grass sound for walking
-                sfx("walk_grass_1", { Volume = 0.4, Pitch = 2.3 + math.random() * 0.2, Spatialized = false })
+            if soundOn then
+                if Player.Position.Y > 41 then
+                    -- Player is on top of a wall - use concrete sound for walking
+                    sfx("walk_concrete_1", { Volume = 0.2, Pitch = 2.3 + math.random() * 0.2, Spatialized = false })
+                else
+                    -- Player is on ground - use grass sound for walking
+                    sfx("walk_grass_1", { Volume = 0.4, Pitch = 2.3 + math.random() * 0.4, Spatialized = false })
+                end
             end
             footstepTimer = footstepTimer % FOOTSTEP_INTERVAL  -- Use modulo instead of reset to 0
         end
@@ -591,17 +622,23 @@ Pointer.Drag = function(pe)
     local Ydiff = pos.Y - downPos.Y
 
     if swipeTriggered == false then
-        -- Swipe Right
-        if Xdiff > SWIPE_THRESHOLD and currentLane <= 0 then
+        -- Swipe Right / Left
+        if math.abs(Xdiff) > math.abs(Ydiff) then
+                    if Xdiff > SWIPE_THRESHOLD and currentLane <= 0 then
             swipeTriggered = true
             targetLane += 1
             isMoving = true
-            sfx("whooshes_small_1", { Volume = 0.5, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
+            if soundOn then
+                sfx("whooshes_small_1", { Volume = 0.4, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
+            end
         elseif Xdiff < -SWIPE_THRESHOLD and currentLane >= 0 then
             swipeTriggered = true
             targetLane -= 1
             isMoving = true
-            sfx("whooshes_small_1", { Volume = 0.5, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
+            if soundOn then
+                sfx("whooshes_small_1", { Volume = 0.4, Pitch = math.random(9000, 10000) / 10000, Spatialized = false })
+            end
+        end
         elseif Ydiff > SWIPE_THRESHOLD then
             swipeTriggered = true
             if Player.IsOnGround then
@@ -629,23 +666,33 @@ Client.OnWorldObjectLoad = function(o)
         groundLevel = o.Position.Y + o.Height * o.Scale.Y
         o.CollisionGroups = COLLISION_GROUPS.GROUND
         o.CollidesWithGroups = COLLISION_GROUPS.PLAYER 
+        ground = o
     end
 end
 
 -- function executed when the game starts
 Client.OnStart = function()
 
+    local BoxMax = Player.CollisionBox.Max
+    local BoxMin = Player.CollisionBox.Min
+    Player.CollisionBox = Box(BoxMin + Number3(0, 0, 3), BoxMax - Number3(0, 0, 3))
+    Player.Body.LocalRotation.X = math.rad(90)
+
+
+    -- set tutorial completed to false for testing
     local store = KeyValueStore(Player.UserID)
     --store:Set("tutorial_completed", false, function(success) end)
-    store:Get("tutorial_completed", function(success, results)
+    store:Get("tutorial_completed", "games_played", function(success, results)
         if success then 
             tutorialCompleted = results.tutorial_completed
+            gamesPlayed = results.games_played or 0
+            print("Games played: " .. gamesPlayed)
             assetsLoaded += 1
             if assetsLoaded == totalAssets then
                 currentState = STATES.MENU
             end
             -- Move the tutorial completion check here, after everything is loaded
-            --print("Tutorial completed: " .. tostring(tutorialCompleted))
+            print("Tutorial completed: " .. tostring(tutorialCompleted))
             if tutorialCompleted then
                 OBSTACLE_SPAWN_Z_OFFSET = 0
                 TUTORIAL_ENABLED = false
@@ -775,13 +822,31 @@ Client.OnStart = function()
             trigger.Physics = PhysicsMode.Trigger
             local triggerBox = Box()
             triggerBox:Fit(wrapper, { recurse = true, localBox = true})
-            triggerBox.Min += Number3(0, 0, -8)
-            triggerBox.Max += Number3(0, 3, 0)
+            boxSize = triggerBox.Size:Copy()
+            triggerBox.Min += Number3(0, 0, 0)
+            triggerBox.Max += Number3(0, 20, 10)
             trigger.CollisionBox = triggerBox
             wrapper:AddChild(trigger)
             trigger.CollisionGroups = nil
             trigger.CollidesWithGroups = COLLISION_GROUPS.PLAYER
+            trigger.stairTrigger = true
+            --displayCollider(trigger)
 
+            -- create a sloped trigger for the stairs
+            local slopeTrigger = Object()
+            slopeTrigger.Physics = PhysicsMode.Static
+            local diagonal = math.sqrt(boxSize.Z^2 + boxSize.Y^2)
+            local slopeTriggerBox = Box({-boxSize.X/2, 0, 0}, {boxSize.X/2, diagonal, 10})
+            local theta = math.atan2(boxSize.Y, boxSize.Z)
+            slopeTrigger.Rotation = Number3(math.rad(90) - theta, 0, 0)
+            slopeTrigger.LocalPosition = Number3(0, 0, -12)
+            slopeTrigger.CollisionBox = slopeTriggerBox
+            wrapper:AddChild(slopeTrigger)
+            slopeTrigger.CollisionGroups = COLLISION_GROUPS.SLOPE
+            slopeTrigger.CollidesWithGroups = nil
+            --displayCollider(slopeTrigger)
+
+            trigger.slope = slopeTrigger
             
         elseif type == "cliff" then
             -- set scale and rotation for cliff
@@ -790,6 +855,14 @@ Client.OnStart = function()
             mesh.LocalRotation = fixedRotation
             mesh.Scale = scale
             wrapper.CollisionGroups = nil
+        elseif type == "tree" then
+            -- set scale and rotation for tree
+            local fixedRotation = Number3(0, 0, 0)
+            scale:Rotate(fixedRotation)
+            mesh.LocalRotation = fixedRotation
+            mesh.Scale = scale
+            wrapper.CollisionGroups = nil
+            wrapper.CollidesWithGroups = nil
         end
 
         wrapper:Recurse(function(o)
@@ -865,8 +938,23 @@ Client.OnStart = function()
         end
     end)
 
+    -- load tree asset
+    -- gltf/tree-with-cube-leaves-1.glb
+    HTTP:Get("https://files.blip.game/gltf/tree-with-cube-leaves-1.glb", function(response)
+        if response.StatusCode == 200 then
+            local req = Object:Load(response.Body, function(o)
+                treePart = wrapMesh(o, Number3(10, 10, 10), "tree")
+                assetsLoaded = assetsLoaded + 1
+                if assetsLoaded == totalAssets then
+                    currentState = STATES.MENU
+                end
+            end)
+        end
+    end)
+
     -- function to create cliff part texture
     -- edit this function to put the webquad into an object, and return the object
+    local cliffLoaded = false
     function createCliffPart()
         local cliffObj = Object()
         local quad = webquad:create({
@@ -886,7 +974,10 @@ Client.OnStart = function()
         cliffObj.Acceleration = -Config.ConstantAcceleration
         cliffObj.CollisionGroups = nil
         cliffObj.CollidesWithGroups = nil
-        assetsLoaded = assetsLoaded + 1
+        if not cliffLoaded then
+            assetsLoaded = assetsLoaded + 1
+            cliffLoaded = true
+        end
         if assetsLoaded == totalAssets then
             currentState = STATES.MENU
         end
@@ -945,12 +1036,28 @@ Client.OnStart = function()
         collidesWithGroups = nil, -- camera will not go through objects in these groups
     }
 
+   --Player.OnCollision = function(self, other, normal)
+     --   print("Other: " , other)
+        
+   -- end
+            
+
     Player.OnCollisionBegin = function(self, other, normal)
+        -- check if player is colliding with stairs
+
         -- Check for landing sound when player hits ground from above
         if normal.Y > 0.5 and currentState == STATES.RUNNING then
-            local obstacleType = obstaclesByRef[other]
+            if other == ground then
+                obstacleType = "ground"
+            else
+                obstacleType = obstaclesByRef[other]
+            end
             if lastGroundObstacleType ~= obstacleType then
-                footstepTimer = FOOTSTEP_INTERVAL
+                --print("Obstacle type: " .. (obstacleType or "nil"))
+                --print("Last obstacle type: " .. (lastGroundObstacleType or "nil"))
+                Client:HapticFeedback()
+                footstepTimer = 0
+                updateFootsteps(FOOTSTEP_INTERVAL)
                 lastGroundObstacleType = obstacleType
             end
         end
@@ -960,10 +1067,21 @@ Client.OnStart = function()
                 -- Check if this is a stairs trigger
                 local parent = other.Parent
                 if obstaclesByRef[parent] == "stairs" then
-                    -- Give the player a boost up and forward, scaled by current game speed
-                    -- At higher speeds, we need a stronger boost to clear obstacles
-                    local boostStrength = gameSpeed * STAIRS_BOOST_MULTIPLIER
-                    Player.Motion.Y = boostStrength  -- Upward boost
+                    if normal.X == 0 then
+                        isOnStairs = true
+                    else
+                        if normal.X < 0 then
+                            targetLane -= 1  
+                        -- hit block from the left
+                        elseif normal.X > 0 then
+                            targetLane += 1  
+                        end
+                        isSlowDownActive = true
+                        slowDownTimer = SLOW_DOWN_DURATION
+                        if soundOn then
+                            sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+                        end
+                    end
                     return
                 end
                 other = parent
@@ -984,10 +1102,12 @@ Client.OnStart = function()
         -- Check for front collision (always fatal)
         if normal.Z < 0 then
             -- Play collision sound based on obstacle type
-            if obstacleType == "log" then
-                sfx("wood_impact_5", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
-            else
-                sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+            if soundOn then
+                if obstacleType == "log" then
+                    sfx("wood_impact_5", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+                else
+                    sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+                end
             end
             gameOver()
             return
@@ -996,10 +1116,12 @@ Client.OnStart = function()
         -- Check if player is already flashing and hits from side
         if isSlowDownActive and normal.Y == 0 then
             -- Play collision sound based on obstacle type
-            if obstacleType == "log" then
-                sfx("wood_impact_5", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
-            else
-                sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+            if soundOn then
+                if obstacleType == "log" then
+                    sfx("wood_impact_5", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+                else
+                    sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+                end
             end
             gameOver()
             return
@@ -1017,25 +1139,25 @@ Client.OnStart = function()
             slowDownTimer = SLOW_DOWN_DURATION
             
             -- Play collision sound based on obstacle type
-            if obstacleType == "log" then
-                sfx("wood_impact_5", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
-            else
-                sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+            if soundOn then
+                if obstacleType == "log" then
+                    sfx("wood_impact_5", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+                else
+                    sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+                end
             end
         end
     end
 
     Player.OnCollisionEnd = function(self, other, normal)
-        local obstacleType = obstaclesByRef[other]
-        if lastGroundObstacleType == obstacleType then
-            lastGroundObstacleType = nil
-        end
+
         if other.Physics == PhysicsMode.Trigger or other.Physics == PhysicsMode.Static then
             if other.Parent ~= nil then
                 -- Check if this is a stairs trigger
                 local parent = other.Parent
                 if obstaclesByRef[parent] == "stairs" then
-                    Player.Motion.Y = 0
+                    --Player.Motion.Y = 0
+                    isOnStairs = false
                     return
                 end
                 other = parent
@@ -1068,6 +1190,31 @@ Client.OnStart = function()
     end
     restartButton:hide()
 
+    -- Create music buttons (volume and mute)
+    musicButtonOn = ui:buttonNeutral({content = "🔊"})
+    musicButtonOn.Width = 50
+    musicButtonOn.Height = 50
+    musicButtonOn.pos = { Menu.Position.X, Menu.Position.Y - 70 }
+    musicButtonOn.onRelease = function()
+        print("music button pressed")
+        soundOn = false
+        musicButtonOn:hide()
+        musicButtonOff:show()
+    end
+    musicButtonOn:show()
+
+    musicButtonOff = ui:buttonNeutral({content = "🔇"})
+    musicButtonOff.Width = 50
+    musicButtonOff.Height = 50
+    musicButtonOff.pos = { Menu.Position.X, Menu.Position.Y - 70 }
+    musicButtonOff.onRelease = function()
+        print("music button pressed")
+        soundOn = true
+        musicButtonOff:hide()
+        musicButtonOn:show()
+    end
+    musicButtonOff:hide()
+
     function spawnTreesOnCliff(cliff)
         -- Check if trees already exist by looking for tree children
         if cliff.hasTrees then
@@ -1077,27 +1224,29 @@ Client.OnStart = function()
         cliff.hasTrees = true
         -- Place two trees at 1/3 and 2/3 along the local X axis of the cliff
         local positions = {
-            -CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.3,
-            -CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.7,
+            Number3(-CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.5, 16, 5),
+            Number3(-CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.5, 20, 7),
+            Number3(CLIFF_LENGTH/2 - CLIFF_LENGTH * 0.5, 12, 3),
+            --CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.3,
+            --CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.7,
             -- -CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.25,
             -- -CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.75
         }
 
-        for _, x in ipairs(positions) do
-            local treeAsset = Config.Items[math.random(1, #Config.Items)]
-            local tree = Shape(treeAsset)
-            cliff:AddChild(tree)
-            tree.Name = "tree"  -- Give trees a name for identification
-            tree.Pivot = {tree.Width * 0.5, 0, tree.Depth * 0.5}
-            tree.Scale = Number3(1, 1, 0.7)
-            tree.LocalPosition = Number3(x, 16, 5)
-            tree.CollisionGroups = nil
-            tree.CollidesWithGroups = nil
-            tree.Physics = PhysicsMode.Disabled
-            tree.Shadow = true
-            -- Counter-rotate the tree to stand upright despite cliff rotation
-            tree.LocalRotation = Number3(-math.pi/6, 0, 0)
-        end
+        -- pick a random position from the table
+        local randomPosition = positions[math.random(1, #positions)]
+
+        print("Assets loaded: " .. assetsLoaded)
+        print("Total assets: " .. totalAssets)
+        local tree = treePart:Copy({ includeChildren = true })
+        cliff:AddChild(tree)
+        tree.Name = "tree"  -- Give trees a name for identification
+        tree.Scale = Number3(1, 1, 0.7)
+        tree.LocalPosition = randomPosition
+        tree.CollisionGroups = nil
+        tree.CollidesWithGroups = nil
+        tree.Physics = PhysicsMode.Disabled
+        tree.LocalRotation = Number3(-math.pi/6, 0, 0)
     end
 end
 
@@ -1234,27 +1383,23 @@ end
 -- Restore getPooledObstacle for pooling
 function getPooledObstacle(obstacleType)
     local pool = obstaclePools[obstacleType]
-    if pool and #pool > 0 then
-        local obj = table.remove(pool)
+    local obj = table.remove(pool)
+    if obj ~= nil then
         obj.IsHidden = false
-        if obstacleType == "cliff" then
-           -- print("Spawned cliff from pool (recycled)")
-        end
         return obj
-    else
-        if obstacleType == "log" and logPart then
-            return logPart:Copy({ includeChildren = true })
-        elseif obstacleType == "wall" and wallPart then
-            return wallPart:Copy({ includeChildren = true })
-        elseif obstacleType == "flag" and flagPart then
-            return flagPart:Copy({ includeChildren = true })
-        elseif obstacleType == "stairs" and stairsPart then
-            return stairsPart:Copy({ includeChildren = true })
-        elseif obstacleType == "cliff" and cliffPart then
-            --print("Spawned new cliff (not recycled)")
-            return createCliffPart()
-            -- cliffPart:Copy({ includeChildren = true })
-        end
+    end
+    -- if we get here, we need to spawn a new obstacle
+    --print("Spawned new copy: " .. obstacleType)
+    if obstacleType == "log" and logPart then
+        return logPart:Copy({ includeChildren = true })
+    elseif obstacleType == "wall" and wallPart then
+        return wallPart:Copy({ includeChildren = true })
+     elseif obstacleType == "flag" and flagPart then
+        return flagPart:Copy({ includeChildren = true })
+    elseif obstacleType == "stairs" and stairsPart then
+        return stairsPart:Copy({ includeChildren = true })
+    elseif obstacleType == "cliff" and cliffPart then
+         return createCliffPart()
     end
     return nil
 end
@@ -1470,6 +1615,8 @@ function clearSegments()
                 local type = obstaclesByRef[obstacle]
                 if type and obstaclePools[type] then
                     table.insert(obstaclePools[type], obstacle)
+                else
+                    print("No pool for obstacle: " .. type)
                 end
                 obstaclesByRef[obstacle] = nil
             end
@@ -1522,6 +1669,12 @@ end
 
 -- Add this function after updateCliffMotion or near other update functions
 function updateCliffs()
+
+    if assetsLoaded < totalAssets then
+        --print("Assets not loaded yet")
+        return
+    end
+
     local function getActiveCliffCountAndFurthestZ()
         local count = 0
         local maxZ = 0
@@ -1545,8 +1698,8 @@ function updateCliffs()
         if TUTORIAL_ENABLED and tutorialStarted and not tutorialCompleted then
             --print("Attempting to spawn cliffs at Z: " .. spawnZ .. " (count: " .. count .. ")")
         end
-        local cliffRight = spawnObstacle("cliff", 1.8, spawnZ)
-        local cliffLeft = spawnObstacle("cliff", -1.8, spawnZ)
+        local cliffRight = spawnObstacle("cliff", 1.75, spawnZ)
+        local cliffLeft = spawnObstacle("cliff", -1.75, spawnZ)
         if cliffRight and cliffLeft then
             cliffRight.Rotation = Number3(math.pi/6, math.pi/2, 0)
             cliffLeft.Rotation = Number3(math.pi/6, -math.pi/2, 0)
@@ -1790,6 +1943,45 @@ Client.Tick = function(dt)
         return
     end
 
+    if not Player.IsOnGround and lastGroundObstacleType ~= nil then
+        lastGroundObstacleType = nil
+       -- print("Resetting last ground obstacle type")
+    end
+
+    if isOnStairs then
+        --[[
+        local b = Player.CollisionBox
+        print("b.Min: ", b.Min)
+
+        local r = Ray(Player.Position + Number3(0, 100, 0), Number3(0, -1, 0))
+        local hit = r:Cast(COLLISION_GROUPS.SLOPE)
+        if hit == nil then
+            r.Origin.Z -= 4
+            hit = r:Cast(COLLISION_GROUPS.SLOPE)
+        end
+    
+        if hit then
+            print("Hit slope")
+            stairsPosY = r.Origin.Y + hit.Distance * r.Direction.Y + 5
+            if Player.Position.Y < stairsPosY then
+                Player.Position.Y = stairsPosY
+            end
+        end
+        ]]
+        
+        local b = Player.CollisionBox
+        local offset = Number3(0, 100, 0)
+        local wMax = Player:PositionLocalToWorld(b.Max) + offset
+        local wMin = Player:PositionLocalToWorld(b.Min) + offset - Number3(0, 0, 5)
+        local worldBox = Box(wMin, wMax)
+        local hit = worldBox:Cast(Number3(0, -1, 0), nil,COLLISION_GROUPS.SLOPE)
+        if hit then
+            stairsPosY = wMin.Y + hit.Distance * -1 + 1
+            if Player.Position.Y < stairsPosY then
+                Player.Position.Y = stairsPosY
+            end
+        end
+    end
     -- Animate obstacles rising from below ground
     for obstacle, anim in pairs(obstacleAnimations) do
         if obstacle and obstacle.Parent then
