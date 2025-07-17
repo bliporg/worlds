@@ -5,6 +5,7 @@ Modules = {
     ui = "uikit",
     webquad = "github.com/aduermael/modzh/webquad:cc6dda1",
     niceleaderboard = "github.com/aduermael/modzh/niceleaderboard:47c44c8",
+    music = "github.com/aduermael/modzh/music:786f55e"
 }
     
 Config.Items = {
@@ -190,9 +191,9 @@ local function createTopRightScore()
     )
     scoreText:setParent(node)
     node.parentDidResize = function()
-        node.pos = {Screen.Width - 55 - node.Width, Screen.Height - 55 - node.Height}
-        node.size = {scoreText.Width + 12, scoreText.Height + 10}
-        scoreText.pos = {5, 5}
+        node.pos = {Screen.Width - Screen.SafeArea.Right - node.Width - 20, Menu.Position.Y + 2}
+        node.size = {scoreText.Width + 12, Menu.Height - 1}
+        scoreText.pos = {5, (Menu.Height - scoreText.Height) / 2}
     end
     node:parentDidResize()
 end
@@ -391,6 +392,16 @@ end
 
 function restartGame()
     print("Restarting game...")
+    Camera.Behavior = {
+        positionTarget = Player, -- camera goes to that position (or position of given object)
+        positionTargetOffset = { 0, 25, 0 }, -- applying offset to the target position (increased Y offset)
+        positionTargetBackoffDistance = 60, -- camera then tries to backoff that distance, considering collision (increased from 40)
+        positionTargetMinBackoffDistance = 30, -- minimum backoff distance (increased from 20)
+        positionTargetMaxBackoffDistance = 120, -- maximum backoff distance (increased from 100)
+        rotationTarget = Rotation(math.rad(20), 0, 0), -- camera rotates to that rotation (or rotation of given object)
+        rigidity = 0.3, -- how fast the camera moves to the target (reduced for smoother movement)
+        collidesWithGroups = nil, -- camera will not go through objects in these groups
+    }
     currentState = STATES.RUNNING
     isGameOver = false
     dropPlayer()
@@ -683,6 +694,42 @@ end
 
 -- function executed when the game starts
 Client.OnStart = function()
+
+    -- camera shake
+    local shakeIntensity = 1.0
+    local shakeTimer = 0
+    local cameraStartShakePosition
+    function shakeCamera()
+        shakeTimer = 0.3
+        cameraStartShakePosition = Camera.Position:Copy()
+    end
+    function applyCameraShake(dt)
+        Camera.Behavior = nil
+        if shakeTimer <= 0 then
+            Camera.Behavior = {
+                positionTarget = Player, -- camera goes to that position (or position of given object)
+                positionTargetOffset = { 0, 25, 0 }, -- applying offset to the target position (increased Y offset)
+                positionTargetBackoffDistance = 60, -- camera then tries to backoff that distance, considering collision (increased from 40)
+                positionTargetMinBackoffDistance = 30, -- minimum backoff distance (increased from 20)
+                positionTargetMaxBackoffDistance = 120, -- maximum backoff distance (increased from 100)
+                rotationTarget = Rotation(math.rad(20), 0, 0), -- camera rotates to that rotation (or rotation of given object)
+                rigidity = 0.3, -- how fast the camera moves to the target (reduced for smoother movement)
+                collidesWithGroups = nil, -- camera will not go through objects in these groups
+            }
+            return
+        end
+        shakeTimer = shakeTimer - dt
+        if shakeTimer > 0 then
+            Camera.Position.X = cameraStartShakePosition.X + (math.random() - 0.5) * 2 * shakeIntensity
+            Camera.Position.Y = cameraStartShakePosition.Y + (math.random() - 0.5) * 2 * shakeIntensity
+        else
+            Camera.Position:Set(cameraStartShakePosition)
+        end
+    end
+
+    if musicOn then
+        music:play({ track = "run-for-fun", volume = 0.27})
+    end
 
     local BoxMax = Player.CollisionBox.Max
     local BoxMin = Player.CollisionBox.Min
@@ -1098,6 +1145,7 @@ Client.OnStart = function()
                                 elseif normal.X > 0 then
                                     targetLane += 1  
                                 end
+                                shakeCamera()
                                 isSlowDownActive = true
                                 slowDownTimer = SLOW_DOWN_DURATION
                                 if soundOn then
@@ -1135,6 +1183,7 @@ Client.OnStart = function()
                     sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
                 end
             end
+            shakeCamera()
             gameOver()
             return
         end
@@ -1149,6 +1198,7 @@ Client.OnStart = function()
                     sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
                 end
             end
+            shakeCamera()
             gameOver()
             return
         end
@@ -1163,7 +1213,7 @@ Client.OnStart = function()
             end
             isSlowDownActive = true
             slowDownTimer = SLOW_DOWN_DURATION
-            
+            shakeCamera()
             -- Play collision sound based on obstacle type
             if soundOn then
                 if obstacleType == "log" then
@@ -1243,9 +1293,10 @@ Client.OnStart = function()
     musicOnButton = ui:buttonNeutral({content = "🎵"})
     musicOnButton.Width = 50
     musicOnButton.Height = 50
-    musicOnButton.pos = { Menu.Position.X + 60, Menu.Position.Y - 70 }
+    musicOnButton.pos = { Menu.Position.X, Menu.Position.Y - 140 }
     musicOnButton.onRelease = function()
         musicOn = false
+        music:stop()
         musicOnButton:hide()
         musicOffButton:show()
     end
@@ -1254,9 +1305,10 @@ Client.OnStart = function()
     musicOffButton = ui:buttonNeutral({content = "🔕"})
     musicOffButton.Width = 50
     musicOffButton.Height = 50
-    musicOffButton.pos = { Menu.Position.X + 60, Menu.Position.Y - 70 }
+    musicOffButton.pos = { Menu.Position.X, Menu.Position.Y - 140 }
     musicOffButton.onRelease = function()
         musicOn = true
+        music:play()
         musicOffButton:hide()
         musicOnButton:show()
     end
@@ -1994,6 +2046,8 @@ Client.Tick = function(dt)
         lastGroundObstacleType = nil
        -- print("Resetting last ground obstacle type")
     end
+
+    applyCameraShake(dt)
 
     if isOnStairs then
         --[[
