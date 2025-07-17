@@ -139,10 +139,13 @@ local assetsLoaded = 0
 local totalAssets = 7  -- log, wall, flag, stairs, cliff, tutorial_completed, tree
 local startButton = nil
 local restartButton = nil
-local musicButtonOn = nil
-local musicButtonOff = nil
+local soundOnButton = nil
+local soundOffButton = nil
+local musicOnButton = nil
+local musicOffButton = nil
 local gamesPlayed = 0
 local soundOn = true
+local musicOn = true
 
 -- Tutorial state variables
 local tutorialState = 0  -- 0 = not started, 1 = walls, 2 = logs, 3 = flags, 4 = complete
@@ -306,11 +309,19 @@ function dropPlayer()
     if restartButton then restartButton:hide() end
     -- Don't reset music button state - preserve current sound setting
     if soundOn then
-        if musicButtonOn then musicButtonOn:show() end
-        if musicButtonOff then musicButtonOff:hide() end
+        if soundOnButton then soundOnButton:show() end
+        if soundOffButton then soundOffButton:hide() end
     else
-        if musicButtonOn then musicButtonOn:hide() end
-        if musicButtonOff then musicButtonOff:show() end
+        if soundOnButton then soundOnButton:hide() end
+        if soundOffButton then soundOffButton:show() end
+    end
+    -- Music button state
+    if musicOn then
+        if musicOnButton then musicOnButton:show() end
+        if musicOffButton then musicOffButton:hide() end
+    else
+        if musicOnButton then musicOnButton:hide() end
+        if musicOffButton then musicOffButton:show() end
     end
 end
 
@@ -354,7 +365,7 @@ function gameOver()
         end
     end
     -- Show leaderboard UI and restart button after a delay
-    showLeaderboardTimer = 2
+    showLeaderboardTimer = 1
     -- Hide the score text in top-right
     if scoreText then 
         scoreText.IsHidden = true 
@@ -1070,16 +1081,31 @@ Client.OnStart = function()
                     if normal.X == 0 then
                         isOnStairs = true
                     else
-                        if normal.X < 0 then
-                            targetLane -= 1  
-                        -- hit block from the left
-                        elseif normal.X > 0 then
-                            targetLane += 1  
-                        end
-                        isSlowDownActive = true
-                        slowDownTimer = SLOW_DOWN_DURATION
-                        if soundOn then
-                            sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+                        -- cast a ray from the player to the stairs to see if it hits the slope trigger
+                        local b = Player.CollisionBox
+                        local offset = Number3(0, 0, -4)
+                        local wMax = Player:PositionLocalToWorld(b.Max) + offset
+                        local wMin = Player:PositionLocalToWorld(b.Min) + offset
+                        local worldBox = Box(wMin, wMax)
+                        local hit = worldBox:Cast(Number3(-normal.X, 0, 0), nil, COLLISION_GROUPS.SLOPE)
+                       -- local ray = Ray(Player.Position + Number3(0, 5, 0), Number3(-normal.X, 0, 0))
+                       -- local hit = ray:Cast(COLLISION_GROUPS.SLOPE)
+                        if hit then
+                            if hit.Distance < 35 then
+                                if normal.X < 0 then
+                                    targetLane -= 1  
+                                -- hit block from the left
+                                elseif normal.X > 0 then
+                                    targetLane += 1  
+                                end
+                                isSlowDownActive = true
+                                slowDownTimer = SLOW_DOWN_DURATION
+                                if soundOn then
+                                    sfx("metal_clanging_6", { Volume = 0.6, Pitch = math.random(9000, 11000) / 10000, Spatialized = false })
+                                end
+                            end
+                        else
+                            isOnStairs = true
                         end
                     end
                     return
@@ -1190,30 +1216,51 @@ Client.OnStart = function()
     end
     restartButton:hide()
 
-    -- Create music buttons (volume and mute)
-    musicButtonOn = ui:buttonNeutral({content = "🔊"})
-    musicButtonOn.Width = 50
-    musicButtonOn.Height = 50
-    musicButtonOn.pos = { Menu.Position.X, Menu.Position.Y - 70 }
-    musicButtonOn.onRelease = function()
-        print("music button pressed")
+    -- Create sound buttons (volume and mute)
+    soundOnButton = ui:buttonNeutral({content = "🔊"})
+    soundOnButton.Width = 50
+    soundOnButton.Height = 50
+    soundOnButton.pos = { Menu.Position.X, Menu.Position.Y - 70 }
+    soundOnButton.onRelease = function()
         soundOn = false
-        musicButtonOn:hide()
-        musicButtonOff:show()
+        soundOnButton:hide()
+        soundOffButton:show()
     end
-    musicButtonOn:show()
+    soundOnButton:show()
 
-    musicButtonOff = ui:buttonNeutral({content = "🔇"})
-    musicButtonOff.Width = 50
-    musicButtonOff.Height = 50
-    musicButtonOff.pos = { Menu.Position.X, Menu.Position.Y - 70 }
-    musicButtonOff.onRelease = function()
-        print("music button pressed")
+    soundOffButton = ui:buttonNeutral({content = "🔇"})
+    soundOffButton.Width = 50
+    soundOffButton.Height = 50
+    soundOffButton.pos = { Menu.Position.X, Menu.Position.Y - 70 }
+    soundOffButton.onRelease = function()
         soundOn = true
-        musicButtonOff:hide()
-        musicButtonOn:show()
+        soundOffButton:hide()
+        soundOnButton:show()
     end
-    musicButtonOff:hide()
+    soundOffButton:hide()
+
+    -- Create music buttons (music on and off)
+    musicOnButton = ui:buttonNeutral({content = "🎵"})
+    musicOnButton.Width = 50
+    musicOnButton.Height = 50
+    musicOnButton.pos = { Menu.Position.X + 60, Menu.Position.Y - 70 }
+    musicOnButton.onRelease = function()
+        musicOn = false
+        musicOnButton:hide()
+        musicOffButton:show()
+    end
+    musicOnButton:show()
+
+    musicOffButton = ui:buttonNeutral({content = "🔕"})
+    musicOffButton.Width = 50
+    musicOffButton.Height = 50
+    musicOffButton.pos = { Menu.Position.X + 60, Menu.Position.Y - 70 }
+    musicOffButton.onRelease = function()
+        musicOn = true
+        musicOffButton:hide()
+        musicOnButton:show()
+    end
+    musicOffButton:hide()
 
     function spawnTreesOnCliff(cliff)
         -- Check if trees already exist by looking for tree children
@@ -1236,8 +1283,8 @@ Client.OnStart = function()
         -- pick a random position from the table
         local randomPosition = positions[math.random(1, #positions)]
 
-        print("Assets loaded: " .. assetsLoaded)
-        print("Total assets: " .. totalAssets)
+        --print("Assets loaded: " .. assetsLoaded)
+        --print("Total assets: " .. totalAssets)
         local tree = treePart:Copy({ includeChildren = true })
         cliff:AddChild(tree)
         tree.Name = "tree"  -- Give trees a name for identification
