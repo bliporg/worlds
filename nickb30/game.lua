@@ -15,6 +15,11 @@ Config.Items = {
     "cawa2un.tree04",
 }
 
+local badge = nil
+if Client.BuildNumber >= 230 then
+    badge = require("badge")
+end
+
 --Dev.DisplayColliders = true
 Config.ConstantAcceleration *= 2
 
@@ -96,7 +101,6 @@ local obstacleTypes = {
     { type = "log", probability = 0.4, minDistance = 80 },
     { type = "wall", probability = 0.25, minDistance = 120, trainLength = {1, 5} },
     { type = "flag", probability = 0.2, minDistance = 100 },
-    --{ type = "stairs", probability = 0.15, minDistance = 120 }
 }
 
 -- obstacle parts
@@ -176,6 +180,18 @@ local OBSTACLE_SPAWN_Z_OFFSET = 850
 local obstacleAnimations = {}  -- { [obstacle] = { targetY = number, duration = number, elapsed = number, startY = number } }
 local OBSTACLE_SPAWN_ANIMATION_OFFSET = 20  -- How far below ground to start
 local OBSTACLE_SPAWN_ANIMATION_DURATION = 0.3  -- Animation duration in seconds
+
+-- Badge unlock tracking
+local previousScore = 0
+local badgeThresholds = {
+    { score = 1000,   name = "good" },
+    { score = 2000,   name = "great" },
+    { score = 5000,   name = "amazing" },
+    { score = 10000,  name = "spectacular" },
+    { score = 20000,  name = "epic" },
+    { score = 40000,  name = "godlike" },
+}
+local unlockedBadges = {}
 
 local function createTopRightScore()
     -- Create score text in top-right corner
@@ -258,6 +274,13 @@ local CLIFF_LENGTH = 85
 local CLIFF_SPAWN_INTERVAL = CLIFF_LENGTH - 15 -- match your cliff Z scale 
 local nextCliffSpawnZ = 0
 
+local debug = false
+function log(message)
+    if debug then
+        print(message)
+    end
+end
+
 -- In dropPlayer, reset nextCliffSpawnZ to the player's Z position
 function dropPlayer()
     Player.Position:Set(0, 40, 0)
@@ -324,6 +347,9 @@ function dropPlayer()
         if musicOnButton then musicOnButton:hide() end
         if musicOffButton then musicOffButton:show() end
     end
+
+    previousScore = 0
+    unlockedBadges = {}
 end
 
 function gameOver()
@@ -332,15 +358,11 @@ function gameOver()
         -- Reload the leaderboard UI after the score is submitted
         leaderboardUI:reload()
     end})
-    -- update games_played
-    local store = KeyValueStore(Player.UserID)
-    store:Set("games_played", gamesPlayed + 1, function(success) end)
-    gamesPlayed += 1
     isGameOver = true
     if soundOn then
         sfx("death_scream_guy_4", { Volume = 0.5, Pitch = math.random() * 0.5 + 0.8, Spatialized = false })
     end
-    print("Game Over")
+    --print("Game Over")
     currentState = STATES.GAME_OVER
     Player.Animations.Walk:Stop()
     Player.Velocity = Number3(0, 0, 0)
@@ -391,7 +413,6 @@ function gameOver()
 end
 
 function restartGame()
-    print("Restarting game...")
     Camera.Behavior = {
         positionTarget = Player, -- camera goes to that position (or position of given object)
         positionTargetOffset = { 0, 25, 0 }, -- applying offset to the target position (increased Y offset)
@@ -409,8 +430,33 @@ function restartGame()
 end
 
 function startGame()
-    print("Starting game...")
-    print("spawn offset: " .. OBSTACLE_SPAWN_Z_OFFSET)
+
+    -- update games_played
+    local store = KeyValueStore(Player.UserID)
+    store:Set("games_played", gamesPlayed + 1, function(success) end)
+    gamesPlayed += 1
+    log("gamesPlayed: " .. gamesPlayed)
+
+    -- gamesplayed badge unlocked based on gamesPlayed
+    -- "rookie" : 10 games
+    -- "resilient" : 100 games
+    -- "relentless" : 200 games
+    -- "unstoppable" : 500 games
+    if Client.BuildNumber >= 230 and badge then
+        if gamesPlayed >= 10 then
+            badge:unlockBadge("rookie", function(err) if err == nil then log("Rookie badge unlocked") end end)
+        end
+        if gamesPlayed >= 100 then
+            badge:unlockBadge("resilient", function(err) if err == nil then log("Resilient badge unlocked") end end)
+        end
+        if gamesPlayed >= 200 then
+            badge:unlockBadge("relentless", function(err) if err == nil then log("Relentless badge unlocked") end end)
+        end
+        if gamesPlayed >= 500 then
+            badge:unlockBadge("unstoppable", function(err) if err == nil then log("Unstoppable badge unlocked") end end)
+        end
+    end
+
     currentState = STATES.RUNNING
     leaderboardUI:hide()
     Player.Animations.Walk:Play()
@@ -442,7 +488,7 @@ end
 
 function startCrouch()
     if not isCrouching then
-        if Player.IsOnGround then
+        if Player.IsOnGround or isOnStairs then
             -- Player is on ground, crouch immediately
             isCrouching = true
             crouchTimer = CROUCH_DURATION
@@ -468,7 +514,7 @@ end
 
 function updateCrouch(dt)
     -- Check if player wanted to crouch and just landed
-    if wantsToCrouch and Player.IsOnGround then
+    if wantsToCrouch and (Player.IsOnGround or isOnStairs) then
         wantsToCrouch = false
         isCrouching = true
         crouchTimer = CROUCH_DURATION
@@ -584,7 +630,19 @@ end
 function updateScore(dt)
     -- Score increases based on game speed multiplier for higher difficulty = higher rewards
     local scoreMultiplier = difficultyMultiplier or 1.0
+    previousScore = score
     score = score + (SCORE_PER_SECOND * scoreMultiplier * dt)
+    -- unlock badges only when crossing thresholds
+    if Client.BuildNumber >= 230 and badge then
+        for _, badgeInfo in ipairs(badgeThresholds) do
+            if not unlockedBadges[badgeInfo.name] and previousScore < badgeInfo.score and score >= badgeInfo.score then
+                badge:unlockBadge(badgeInfo.name, function(err)
+                    if err == nil then log(badgeInfo.name .. " badge unlocked") end
+                end)
+                unlockedBadges[badgeInfo.name] = true
+            end
+        end
+    end
 end
 
 function updateFootsteps(dt)
@@ -608,9 +666,6 @@ function updateFootsteps(dt)
     else
         -- Only reset timer when game is not running, not when player is in air
         if currentState ~= STATES.RUNNING then
-            if footstepTimer > 0 then
-                print("Footstep timer reset: currentState=" .. currentState .. ", IsOnGround=" .. tostring(Player.IsOnGround))
-            end
             footstepTimer = 0
         end
     end
@@ -682,9 +737,6 @@ end
 Client.OnWorldObjectLoad = function(o)
     if o.Name == "ground" then
         o.IsHidden = true
-        -- print("ground height: " .. o.Position.Y)
-        -- print(o.Height)
-        -- print("pivot: " .. o.Pivot.Y)
         groundLevel = o.Position.Y + o.Height * o.Scale.Y
         o.CollisionGroups = COLLISION_GROUPS.GROUND
         o.CollidesWithGroups = COLLISION_GROUPS.PLAYER 
@@ -695,6 +747,11 @@ end
 -- function executed when the game starts
 Client.OnStart = function()
 
+    if Client.BuildNumber >= 230 then
+        badge:unlockBadge("welcome", function(err) 
+        end)
+    end
+    
     -- camera shake
     local shakeIntensity = 1.0
     local shakeTimer = 0
@@ -744,20 +801,15 @@ Client.OnStart = function()
         if success then 
             tutorialCompleted = results.tutorial_completed
             gamesPlayed = results.games_played or 0
-            print("Games played: " .. gamesPlayed)
+            --print("Games played: " .. gamesPlayed)
             assetsLoaded += 1
             if assetsLoaded == totalAssets then
                 currentState = STATES.MENU
             end
-            -- Move the tutorial completion check here, after everything is loaded
-            print("Tutorial completed: " .. tostring(tutorialCompleted))
             if tutorialCompleted then
                 OBSTACLE_SPAWN_Z_OFFSET = 0
                 TUTORIAL_ENABLED = false
-                --print("Tutorial disabled due to previous completion")
             end
-            --print("OBSTACLE_SPAWN_Z_OFFSET: " .. OBSTACLE_SPAWN_Z_OFFSET)
-            --print("KeyValueStore: " .. tostring(results.tutorial_completed))
         end
     end)
 
@@ -773,10 +825,10 @@ Client.OnStart = function()
             Sky.AbyssColor = Color.White
         end
     end)
-    -- Collision Groups
+
     -- Leaderboard
-    leaderboard = Leaderboard("default")
-    leaderboardUI = niceleaderboard({})
+    leaderboard = Leaderboard("default_2")
+    leaderboardUI = niceleaderboard({leaderboardName = "default_2"})
     leaderboardUI.Width = 200
     leaderboardUI.Height = 300
     leaderboardUI.Position = { Screen.Width / 2 - leaderboardUI.Width / 2, Screen.Height / 2 - leaderboardUI.Height / 2 }
@@ -833,7 +885,12 @@ Client.OnStart = function()
             wrapper.CollidesWithGroups = COLLISION_GROUPS.PLAYER
         elseif type == "wall" then
             -- set scale and rotation
-            local fixedRotation = Number3(math.rad(90), 0, 0)
+            local fixedRotation
+            if Client.BuildNumber < 230 then
+                fixedRotation = Number3(math.rad(90), 0, 0)
+            else
+                fixedRotation = Number3(math.rad(90), 0, math.rad(180))
+            end
             scale:Rotate(fixedRotation)
             mesh.LocalRotation = fixedRotation
             mesh.Scale = scale
@@ -863,9 +920,14 @@ Client.OnStart = function()
 
         elseif type == "stairs" then
             -- set scale and rotation
-            local fixedRotation = Number3(0, 0, 0)
-            scale:Rotate(fixedRotation)
-            mesh.LocalRotation = fixedRotation
+            local fixedRotation
+            if Client.BuildNumber < 230 then
+                fixedRotation = Number3(0, 0, 0)
+                scale:Rotate(fixedRotation)
+            else
+                fixedRotation = Number3(0, math.rad(180), 0)
+            end
+            mesh.Rotation = fixedRotation
             mesh.Scale = scale
 
             -- set collision box and groups - make it a trigger for boost
@@ -893,7 +955,7 @@ Client.OnStart = function()
             -- create a sloped trigger for the stairs
             local slopeTrigger = Object()
             slopeTrigger.Physics = PhysicsMode.Static
-            local diagonal = math.sqrt(boxSize.Z^2 + boxSize.Y^2)
+            local diagonal = math.sqrt(boxSize.Z^2 + boxSize.Y^2) 
             local slopeTriggerBox = Box({-boxSize.X/2, 0, 0}, {boxSize.X/2, diagonal, 10})
             local theta = math.atan2(boxSize.Y, boxSize.Z)
             slopeTrigger.Rotation = Number3(math.rad(90) - theta, 0, 0)
@@ -1015,19 +1077,47 @@ Client.OnStart = function()
     local cliffLoaded = false
     function createCliffPart()
         local cliffObj = Object()
+        -- Main vertical face
         local quad = webquad:create({
             url = "https://files.blip.game/textures/grass-tile.jpg",
             filtering = false,
         })
         quad.Physics = PhysicsMode.Disabled
-        --quad.CollisionGroups = nil
-        --quad.CollidesWithGroups = nil
         quad.Width = CLIFF_LENGTH * 4
         quad.Height = 45 * 4
         quad.Scale = 1/4
         quad.Anchor = { 0.5, 0 }
-       -- quad.Rotation = { math.rad(90), 0, 0}
         cliffObj:AddChild(quad)
+
+        -- Top grass cap
+        local topQuad = webquad:create({
+            url = "https://files.blip.game/textures/grass-tile.jpg",
+            filtering = false,
+        })
+        topQuad.Physics = PhysicsMode.Disabled
+        topQuad.Width = CLIFF_LENGTH * 4
+        topQuad.Height = 45 * 4  -- Use same as vertical for now
+        topQuad.Scale = 1/4
+        topQuad.Anchor = { 0.5, 0 }  -- Pivot from back edge
+        topQuad.Rotation = { 0, 0, 0 }  -- Lay flat
+        -- 2*math.pi/6 to lay flat
+        topQuad.Position = { 0, 45, 0 }  -- Y = height of vertical face (before scaling)
+        cliffObj:AddChild(topQuad)
+
+        -- Top grass cap
+        local topQuad = webquad:create({
+            url = "https://files.blip.game/textures/grass-tile.jpg",
+            filtering = false,
+        })
+        topQuad.Physics = PhysicsMode.Disabled
+        topQuad.Width = CLIFF_LENGTH * 12
+        topQuad.Height = 45 * 4  -- Use same as vertical for now
+        topQuad.Scale = 1/4
+        topQuad.Anchor = { 0.5, 0 }  -- Pivot from back edge
+        topQuad.Rotation = { 2*math.pi/6, 0, 0 }  -- Lay flat
+        topQuad.Position = { 0, 90, 0 }  -- Y = height of vertical face (before scaling)
+        cliffObj:AddChild(topQuad)
+
         cliffObj.Physics = PhysicsMode.Dynamic
         cliffObj.Acceleration = -Config.ConstantAcceleration
         cliffObj.CollisionGroups = nil
@@ -1072,13 +1162,8 @@ Client.OnStart = function()
     -- Load the high score initially
     loadHighScore()
 
-    -- Debug: Print initial lane tracker values
-   -- print("Initial lane tracker values:")
-   -- printLaneTrackers()
-
     Player.Animations.Walk.Speed = ANIMATION_SPEED
     Player.Animations.Walk:Play()
-    -- print("Initial Player.Scale.Y:", Player.Scale.Y)
     Player.Scale.Y = NORMAL_SCALE  -- Ensure player starts at normal scale
     World:AddChild(Player)
     dropPlayer()
@@ -1094,12 +1179,6 @@ Client.OnStart = function()
         collidesWithGroups = nil, -- camera will not go through objects in these groups
     }
 
-   --Player.OnCollision = function(self, other, normal)
-     --   print("Other: " , other)
-        
-   -- end
-            
-
     Player.OnCollisionBegin = function(self, other, normal)
         -- check if player is colliding with stairs
 
@@ -1111,8 +1190,6 @@ Client.OnStart = function()
                 obstacleType = obstaclesByRef[other]
             end
             if lastGroundObstacleType ~= obstacleType then
-                --print("Obstacle type: " .. (obstacleType or "nil"))
-                --print("Last obstacle type: " .. (lastGroundObstacleType or "nil"))
                 Client:HapticFeedback()
                 footstepTimer = 0
                 updateFootsteps(FOOTSTEP_INTERVAL)
@@ -1127,6 +1204,9 @@ Client.OnStart = function()
                 if obstaclesByRef[parent] == "stairs" then
                     if normal.X == 0 then
                         isOnStairs = true
+                        if Player.Velocity.Y < 0 then
+                            Player.Velocity.Y = 0
+                        end
                     else
                         -- cast a ray from the player to the stairs to see if it hits the slope trigger
                         local b = Player.CollisionBox
@@ -1135,8 +1215,6 @@ Client.OnStart = function()
                         local wMin = Player:PositionLocalToWorld(b.Min) + offset
                         local worldBox = Box(wMin, wMax)
                         local hit = worldBox:Cast(Number3(-normal.X, 0, 0), nil, COLLISION_GROUPS.SLOPE)
-                       -- local ray = Ray(Player.Position + Number3(0, 5, 0), Number3(-normal.X, 0, 0))
-                       -- local hit = ray:Cast(COLLISION_GROUPS.SLOPE)
                         if hit then
                             if hit.Distance < 35 then
                                 if normal.X < 0 then
@@ -1326,17 +1404,11 @@ Client.OnStart = function()
             Number3(-CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.5, 16, 5),
             Number3(-CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.5, 20, 7),
             Number3(CLIFF_LENGTH/2 - CLIFF_LENGTH * 0.5, 12, 3),
-            --CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.3,
-            --CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.7,
-            -- -CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.25,
-            -- -CLIFF_LENGTH/2 + CLIFF_LENGTH * 0.75
         }
 
         -- pick a random position from the table
         local randomPosition = positions[math.random(1, #positions)]
 
-        --print("Assets loaded: " .. assetsLoaded)
-        --print("Total assets: " .. totalAssets)
         local tree = treePart:Copy({ includeChildren = true })
         cliff:AddChild(tree)
         tree.Name = "tree"  -- Give trees a name for identification
@@ -1369,15 +1441,7 @@ function updateSegments(gameProgress)
         end
         -- Do NOT return here; let normal cleanup logic run for flags and other obstacles
     end
-    
-    -- Reset lane trackers if lastSpawnZ is too far behind the current progress
-    --[[
-    for _, tracker in pairs(laneTrackers) do
-        if gameProgress - tracker.lastSpawnZ > MAX_SPAWN_DISTANCE then
-            tracker.lastSpawnZ = gameProgress - MAX_SPAWN_DISTANCE + tracker.minDistance
-        end
-    end
-    ]]
+
     -- get furthest Z position of cliffs
     local furthestCliffZ = 0
     for obstacle, type in pairs(obstaclesByRef) do
@@ -1390,7 +1454,6 @@ function updateSegments(gameProgress)
     currentSpawnZ = math.min(currentSpawnZ, furthestCliffZ + OBSTACLE_SPAWN_Z_OFFSET - 30)
     
     -- Spawn obstacles at the current position (no loop needed since this runs every frame)
-   --print("Attempting to spawn obstacles at Z: " .. currentSpawnZ)
     local newObstacles = spawnObstaclesAtPosition(currentSpawnZ)
     if newObstacles and #newObstacles > 0 then
         -- Create a segment entry for tracking
@@ -1488,7 +1551,6 @@ function getPooledObstacle(obstacleType)
         return obj
     end
     -- if we get here, we need to spawn a new obstacle
-    --print("Spawned new copy: " .. obstacleType)
     if obstacleType == "log" and logPart then
         return logPart:Copy({ includeChildren = true })
     elseif obstacleType == "wall" and wallPart then
@@ -1535,7 +1597,6 @@ function spawnObstaclesAtPosition(zPosition)
     -- Lane obstacles
     for lane = -1, 1 do
         local tracker = getLaneTracker(lane)
-        --print("Can spawn in lane: " .. tostring(canSpawnInLane(lane, zPosition)))
         if tracker and canSpawnInLane(lane, zPosition) then
             local obstacleData = selectObstacleType()
             if wouldCreateImpossibleSegment(lane, obstacleData.type, zPosition) then
@@ -1560,7 +1621,6 @@ function spawnObstaclesAtPosition(zPosition)
                     end
                 end
                 tracker.lastSpawnZ = zPosition + ((trainLength) * WALL_SPACING)
-                --print("Set lastSpawnZ to: " .. tracker.lastSpawnZ)
                 tracker.minDistance = obstacleData.minDistance
                 tracker.wallTrainCount = 0
             else
@@ -1568,7 +1628,6 @@ function spawnObstaclesAtPosition(zPosition)
                 if obstacle then
                     table.insert(spawnedObstacles, obstacle)
                     tracker.lastSpawnZ = zPosition
-                    --print("Set lastSpawnZ to: " .. tracker.lastSpawnZ)
                     tracker.minDistance = obstacleData.minDistance
                 end
             end
@@ -1613,14 +1672,12 @@ function prepopulateCliffPool(poolSize)
         print("Cannot prepopulate cliff pool - cliffPart not loaded yet")
         return
     end
-    
-    --print("Prepopulating cliff pool with " .. poolSize .. " cliffs...")
+
     for i = 1, poolSize do
         local cliff = createCliffPart()
         cliff.IsHidden = true
         table.insert(obstaclePools.cliff, cliff)
     end
-    --print("Cliff pool prepopulated with " .. #obstaclePools.cliff .. " cliffs")
 end
 
 function getLaneTracker(lane)
@@ -1669,7 +1726,6 @@ function canSpawnInLane(lane, currentZ)
     updateLaneTrackerLastSpawnZ(lane)
     
     -- For non-wall train spawning, check minimum distance
-    --print("Current Z: " .. currentZ .. ", Last Spawn Z: " .. tracker.lastSpawnZ .. ", Min Distance: " .. tracker.minDistance)
     return (currentZ - tracker.lastSpawnZ) >= tracker.minDistance
 end
 
@@ -1733,14 +1789,12 @@ function clearSegments()
     end
     segments = {}
     -- Reset lane trackers
-   -- print("Resetting lane trackers in clearSegments()")
     laneTrackers.left.lastSpawnZ = 0
     laneTrackers.center.lastSpawnZ = 0
     laneTrackers.right.lastSpawnZ = 0
     laneTrackers.left.minDistance = 100
     laneTrackers.center.minDistance = 100
     laneTrackers.right.minDistance = 100
-    --printLaneTrackers()
     laneTrackers.left.wallTrainCount = 0
     laneTrackers.center.wallTrainCount = 0
     laneTrackers.right.wallTrainCount = 0
@@ -1756,13 +1810,7 @@ function updateCliffMotion(newSpeed)
         if type == "cliff" then
             obstacle.Motion.Z = -newSpeed
             cliffCount = cliffCount + 1
-            if cliffCount == 1 then
-               -- print("Cliff position: " .. obstacle.Position.Z .. ", Motion.Z: " .. obstacle.Motion.Z)
-            end
         end
-    end
-    if cliffCount > 0 then
-        --print("Updated " .. cliffCount .. " cliffs with speed: " .. newSpeed)
     end
 end
 
@@ -1770,7 +1818,6 @@ end
 function updateCliffs()
 
     if assetsLoaded < totalAssets then
-        --print("Assets not loaded yet")
         return
     end
 
@@ -1789,14 +1836,8 @@ function updateCliffs()
     end
 
     local count, furthestZ = getActiveCliffCountAndFurthestZ()
-    if TUTORIAL_ENABLED and tutorialStarted and not tutorialCompleted then
-        --print("Tutorial cliffs - count: " .. count .. ", furthestZ: " .. furthestZ .. ", MAX_ACTIVE_CLIFFS: " .. MAX_ACTIVE_CLIFFS)
-    end
     while count < MAX_ACTIVE_CLIFFS do
         local spawnZ = (count == 0 and 0) or (furthestZ + CLIFF_SPAWN_INTERVAL)
-        if TUTORIAL_ENABLED and tutorialStarted and not tutorialCompleted then
-            --print("Attempting to spawn cliffs at Z: " .. spawnZ .. " (count: " .. count .. ")")
-        end
         local cliffRight = spawnObstacle("cliff", 1.75, spawnZ)
         local cliffLeft = spawnObstacle("cliff", -1.75, spawnZ)
         if cliffRight and cliffLeft then
@@ -1813,13 +1854,7 @@ function updateCliffs()
             spawnTreesOnCliff(cliffLeft)
             count = count + 2
             furthestZ = spawnZ
-            if TUTORIAL_ENABLED and tutorialStarted and not tutorialCompleted then
-                --print("Successfully spawned tutorial cliffs at Z: " .. spawnZ)
-            end
         else
-            if TUTORIAL_ENABLED and tutorialStarted and not tutorialCompleted then
-                --print("Failed to spawn cliffs at Z: " .. spawnZ)
-            end
             break
         end
     end
@@ -1981,26 +2016,23 @@ function updateTutorial()
                 break
             end
         end
-        --print("Tutorial State 3 - flagsPassed: " .. tostring(flagsPassed) .. ", allFlagsBehind: " .. tostring(allFlagsBehind) .. ", isCrouching: " .. tostring(isCrouching))
         if isCrouching then
             if flagsPassed and allFlagsBehind then
-                --print("Tutorial completing - player crouched and flags passed!")
                 tutorialState = 4
                 hideTutorialText()
                 tutorialCompleted = true
                 cleanupTutorialObstacles()
             end
         elseif flagsPassed and allFlagsBehind then
-            --print("Tutorial completing - flags passed without crouching!")
             tutorialState = 4
             hideTutorialText()
             tutorialCompleted = true
             TUTORIAL_ENABLED = false
             OBSTACLE_SPAWN_Z_OFFSET = 0
-            print("Tutorial ended!")
+            --print("Tutorial ended!")
             
-                -- Reset lane trackers after tutorial ends so normal spawning can begin
-            print("Resetting lane trackers after tutorial end")
+            -- Reset lane trackers after tutorial ends so normal spawning can begin
+            --print("Resetting lane trackers after tutorial end")
             laneTrackers.left.lastSpawnZ = 0
             laneTrackers.center.lastSpawnZ = 0
             laneTrackers.right.lastSpawnZ = 0
@@ -2010,13 +2042,7 @@ function updateTutorial()
             printLaneTrackers()
             
             local store = KeyValueStore(Player.UserID)
-            store:Set("tutorial_completed", true, function(success) 
-                if success then
-                    --print("Tutorial completed saved")
-                else
-                    --print("Tutorial completed not saved")
-                end
-            end)
+            store:Set("tutorial_completed", true, function(success) end)
             cleanupTutorialObstacles()
         end
     end
@@ -2044,32 +2070,11 @@ Client.Tick = function(dt)
 
     if not Player.IsOnGround and lastGroundObstacleType ~= nil then
         lastGroundObstacleType = nil
-       -- print("Resetting last ground obstacle type")
     end
 
     applyCameraShake(dt)
 
     if isOnStairs then
-        --[[
-        local b = Player.CollisionBox
-        print("b.Min: ", b.Min)
-
-        local r = Ray(Player.Position + Number3(0, 100, 0), Number3(0, -1, 0))
-        local hit = r:Cast(COLLISION_GROUPS.SLOPE)
-        if hit == nil then
-            r.Origin.Z -= 4
-            hit = r:Cast(COLLISION_GROUPS.SLOPE)
-        end
-    
-        if hit then
-            print("Hit slope")
-            stairsPosY = r.Origin.Y + hit.Distance * r.Direction.Y + 5
-            if Player.Position.Y < stairsPosY then
-                Player.Position.Y = stairsPosY
-            end
-        end
-        ]]
-        
         local b = Player.CollisionBox
         local offset = Number3(0, 100, 0)
         local wMax = Player:PositionLocalToWorld(b.Max) + offset
@@ -2077,7 +2082,7 @@ Client.Tick = function(dt)
         local worldBox = Box(wMin, wMax)
         local hit = worldBox:Cast(Number3(0, -1, 0), nil,COLLISION_GROUPS.SLOPE)
         if hit then
-            stairsPosY = wMin.Y + hit.Distance * -1 + 1
+            stairsPosY = wMin.Y + hit.Distance * -1 + 2
             if Player.Position.Y < stairsPosY then
                 Player.Position.Y = stairsPosY
             end
@@ -2169,7 +2174,6 @@ Client.Tick = function(dt)
         end
         -- Also update cliff motion during tutorial
         updateCliffMotion(gameSpeed)
-        --print("Tutorial active - updating cliff motion with speed: " .. gameSpeed)
     end
 
     -- Calculate offset based on position delta
