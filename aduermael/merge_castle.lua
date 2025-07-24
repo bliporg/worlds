@@ -1,7 +1,7 @@
 --[[
-	MERGE CASTLE
+    MERGE CASTLE
 
-	2048-style game with medieval theme
+    2048-style game with medieval theme
 ]]
 
 Config = {
@@ -9,7 +9,7 @@ Config = {
 		"voxels.ground_tile",
 		"voxels.metal_panel_2",
 	},
-	UsePBR = true,
+	UsePBR = false,
 }
 
 Modules = {
@@ -20,6 +20,12 @@ Modules = {
 }
 
 -- CONSTANTS
+
+local MAP_SCALE = 45
+local MAP_POSITION_ADJUSTMENT = Number3(0, -1.6, -20) -- horizontal, height, vertical
+local MAP_ROTATION_X = math.rad(0)
+local MAP_ROTATION_Y = math.rad(90)
+local MAP_ROTATION_Z = math.rad(-20)
 
 local TILES_GAMESTART = 2
 local TILES_INITIAL_MAX_POW = 2
@@ -229,15 +235,16 @@ Client.OnStart = function()
 				mountain = o
 				o.Shadow = true
 				o.Pivot = o.Size * { 0, 1, 0 }
-				o.Scale = 10 -- 45
+				o.Scale = MAP_SCALE
 				o:SetParent(board)
-				o.LocalPosition = board.Size * 0.5 + { 0, -1.6, 23 }
-				o.Rotation:Set(0, math.rad(270), math.rad(-20))
+				o.LocalPosition = board.Size * 0.5 + MAP_POSITION_ADJUSTMENT
 				-- models were flipped along X axis in previous versions
 				-- it's been fixed so the rotation has to be changed accordingly
-				if Client.BuildNumber >= 223 then
-					o.Rotation:Set(0, math.rad(90), math.rad(20))
-				end
+				--if Client.BuildNumber >= 223 then
+				o.Rotation:Set(MAP_ROTATION_X, MAP_ROTATION_Y, MAP_ROTATION_Z)
+				--else
+				--	o.Rotation:Set(0, math.rad(270), math.rad(-20))
+				--end
 			end)
 		end
 	end)
