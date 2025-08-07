@@ -14,15 +14,16 @@ Config = {
 	},
 }
 
+Modules = {
+	podium = "github.com/aduermael/modzh/podium",
+}
+
 -- CONSTANTS
 
 local MAP_SCALE = 2
 local DEBUG = false -- starts with a single player
-local SOUND = true
 local ROUND_DURATION = 120
-local SPAWN_BLOCK_COLOR = Color(136, 0, 252)
 local MAX_NB_KILLS_END_ROUND = 40
-local weaponName = nil
 
 local UI_MARGIN = 4
 
@@ -97,6 +98,12 @@ local function generateMapFromChunks()
 	local chunk4 = initChunk("dustzh_chunk_4")
 	local chunk5 = initChunk("dustzh_chunk_5")
 
+	chunk1.Shadow = true
+	chunk2.Shadow = true
+	chunk3.Shadow = true
+	chunk4.Shadow = true
+	chunk5.Shadow = true
+
 	chunk2.Position = Number3(-2 * scale, 4 * scale, chunk1.Depth * scale)
 	chunk3.Position = Number3(-chunk1.Width * scale, 0 * scale, (12 + chunk1.Depth) * scale)
 	chunk4.Position = Number3((-chunk1.Width - 12) * scale, 0, 20 * scale)
@@ -114,11 +121,15 @@ function placeProps()
 		s.Rotation = info.r
 		s.Scale = info.s
 		s.Pivot = Number3(s.Width / 2, 0, s.Depth / 2)
+		s.Shadow = true
 
-		require("hierarchyactions"):applyToDescendants(s, { includeRoot = true }, function(shape)
+		s:Recurse(function(shape)
+			if not shape.Physics then
+				return
+			end
 			shape.Physics = PhysicsMode.StaticPerBlock
 			shape.CollisionGroups = Map.CollisionGroups
-		end)
+		end, { includeRoot = true })
 	end
 
 	for _, info in ipairs(savedObjects) do
@@ -135,6 +146,13 @@ function placeProps()
 	end
 end
 
+function canMove()
+	if not Player.isDead or Player:isDead() or gsm.state == gsm.States.EndRound then
+		return false
+	end
+	return true
+end
+
 Client.OnStart = function()
 	controls = require("controls")
 	controls:setButtonIcon("action1", "⬆️")
@@ -144,13 +162,23 @@ Client.OnStart = function()
 	placeProps()
 	-- Map
 
+	Clouds.On = false
+	HTTP:Get("https://files.blip.game/skyboxes/sunny-sky-with-clouds.ktx", function(response)
+		if response.StatusCode == 200 then
+			Sky.Image = response.Body
+			Sky.SkyColor = Color.White
+			Sky.HorizonColor = Color.White
+			Sky.AbyssColor = Color.White
+		end
+	end)
+
 	generateMapFromChunks()
 	spawnPoints = JSON:Decode(
 		'[{"p":[-54.734,11.6904,62.8359],"rY":0.0126201},{"p":[-245.448,39.3373,98.7844],"rY":0.0605912},{"p":[-268.832,32.6757,224.197],"rY":1.5624},{"p":[-176.63,37.7461,281.024],"rY":5.91473},{"p":[-130.289,64.3296,454.234],"rY":4.13691},{"p":[103.866,46.8537,460.034],"rY":3.6675},{"p":[-13.5333,31.5645,352.71],"rY":3.22079},{"p":[153.182,28.8819,314.506],"rY":3.92754},{"p":[220.249,14.7999,196.709],"rY":3.44043},{"p":[153.557,34.7014,63.7065],"rY":0.420805},{"p":[76.2078,34.8703,59.8622],"rY":6.20929},{"p":[50.9595,10.5063,83.8885],"rY":6.12099},{"p":[-87.317,14.3838,180.542],"rY":1.61218}]'
 	)
 
 	-- DEBUG (spawn all players at the same position)
-	-- spawnPoints = JSON:Decode("[{\"p\":[-54.734,11.6904,62.8359],\"rY\":0.0126201}]")
+	-- spawnPoints = JSON:Decode("[{"p":[-54.734,11.6904,62.8359],"rY":0.0126201}]")
 
 	local ambience = require("ambience")
 	ambience:set(ambience.noon)
@@ -160,17 +188,23 @@ Client.OnStart = function()
 	ease = require("ease")
 	ui = require("uikit")
 	multi = require("multi")
+
 	multi.teleportTriggerDistance = 100
 
 	weapons:init()
 	weapons:setList(weaponsList)
 	weapons:setPlayerMaxHP(100)
 
-	victoryPodium:init()
 	uiRoundDuration:init()
 	killfeed:init()
 
 	cameraCustomFirstPerson = function()
+		--[[
+        if require("cameras") then
+            require("cameras"):SetModeFirstPerson()
+            return
+        end
+        --]]
 		Camera:SetModeFirstPerson()
 		Player.Head.IsHidden = false
 		Player.Head.IsHiddenSelf = true
@@ -190,23 +224,52 @@ Client.OnStart = function()
 			end
 		end
 
-		local localevent = require("localevent")
-		localevent:Listen(localevent.Name.AvatarLoaded, function()
-			for _, v in pairs(Player.equipments) do
-				v.IsHiddenSelf = true
-				if v.attachedParts then
-					for _, v2 in ipairs(v.attachedParts) do
-						v2.IsHiddenSelf = true
-					end
-				end
+		Client.AnalogPad = function(dx, dy)
+			if canMove() == false then
+				return
 			end
-		end)
+
+			Player.LocalRotation = Rotation(0, dx * 0.01, 0) * Player.LocalRotation
+			Player.Head.LocalRotation = Rotation(-dy * 0.01, 0, 0) * Player.Head.LocalRotation
+
+			local dpad = require("controls").DirectionalPadValues
+			Player.Motion = (Player.Forward * dpad.Y + Player.Right * dpad.X) * 40
+		end
+
+		Client.DirectionalPad = function(x, y)
+			if canMove() == false then
+				return
+			end
+
+			Player.Motion = (Player.Forward * y + Player.Right * x) * 40
+		end
 	end
 
 	-- Player
-	Camera:SetModeFirstPerson()
+	cameraCustomFirstPerson()
 	Player.Head:AddChild(AudioListener)
 	World:AddChild(Player)
+
+	LocalEvent:Listen(LocalEvent.Name.AvatarLoaded, function(p)
+		if p ~= Player and Player.equipments then
+			return
+		end
+		if not Player.equipments then
+			return
+		end
+		if Player.EyeLidRight then
+			Player.EyeLidRight:RemoveFromParent()
+			Player.EyeLidLeft:RemoveFromParent()
+		end
+		for _, v in pairs(Player.equipments) do
+			v.IsHiddenSelf = true
+			if v.attachedParts then
+				for _, v2 in ipairs(v.attachedParts) do
+					v2.IsHiddenSelf = true
+				end
+			end
+		end
+	end)
 
 	respawn = function(target)
 		if not target or target.IsHidden == nil then
@@ -221,7 +284,9 @@ Client.OnStart = function()
 				return
 			end
 			target.IsHidden = false
-			target:resetHP()
+			if target.resetHP then
+				target:resetHP()
+			end
 		end)
 	end
 
@@ -234,13 +299,13 @@ Client.OnStart = function()
 
 	-- Game State Manager
 	gsm.clientLobbyOnStart = function()
-		victoryPodium:stop()
+		podium:remove()
 		cameraCustomFirstPerson()
 		print("Lobby, waiting for one more player.")
 		respawn(Player)
 	end
 	gsm.clientPreRoundOnStart = function()
-		victoryPodium:stop()
+		podium:remove()
 	end
 	gsm.clientRoundOnStart = function()
 		killfeed:clearEntries()
@@ -264,21 +329,29 @@ Client.OnStart = function()
 
 		killfeed:clearEntries()
 		local sortedPlayers = {}
-		for _, v in ipairs(gsm.playersInRound) do
-			table.insert(sortedPlayers, v)
-			pcall(function()
-				v.Motion = Number3(0, 0, 0)
-				v.nbKills = v.nbKills or 0
-			end)
+		for i, v in ipairs(gsm.playersInRound) do
+			v.Motion:Set(0, 0, 0)
+			v.Velocity:Set(0, 0, 0)
+			v.nbKills = v.nbKills or 0
+			sortedPlayers[i] = {
+				username = v.Username,
+				userID = v.UserID,
+				score = v.nbKills,
+			}
 		end
 		table.sort(sortedPlayers, function(a, b)
-			return a.nbKills > b.nbKills
+			return a.score > b.score
 		end)
 
 		weapons:setWeapon(Player, Player.weaponId, true)
-		Player.Motion = { 0, 0, 0 }
-		Player.Velocity = { 0, 0, 0 }
-		victoryPodium:teleportPlayers(sortedPlayers)
+		Player.Motion:Set(0, 0, 0)
+		Player.Velocity:Set(0, 0, 0)
+
+		if instructions:isVisible() then
+			instructions:hide()
+		end
+
+		podium:show({ players = sortedPlayers, title = "🏆 Winners 🏆" })
 	end
 
 	gsm.clientRoundPlayersUpdate = function(gsm, list)
@@ -287,64 +360,19 @@ Client.OnStart = function()
 
 	-- UI
 	playerInfo:show()
-end
 
-Client.OnPlayerJoin = function(p)
-	p.Scale = 0.3
-	local bg
-	if p == Player then
-		bg = ui:createFrame(Color.Black)
-		bg.Width = Screen.Width
-		bg.Height = Screen.Height
-	end
-	print(p.Username .. " joined the game.")
-
-	Timer(1, function()
-		cameraCustomFirstPerson()
-		if p == Player then
-			respawn(p)
-			bg:remove()
-		end
-	end)
 	instructions:display()
-end
 
-Client.OnPlayerLeave = function(p)
-	print(p.Username .. " just left the game.")
-end
-
-Client.AnalogPad = function(dx, dy)
-	Player.LocalRotation.Y = Player.LocalRotation.Y + dx * 0.01
-	Player.LocalRotation.X = Player.LocalRotation.X + -dy * 0.01
-
-	if Player:isDead() or gsm.state == gsm.States.EndRound then
-		return
-	end
-	if dpadX ~= nil and dpadY ~= nil then
-		Player.Motion = (Player.Forward * dpadY + Player.Right * dpadX) * 40
-	end
-end
-
-Client.DirectionalPad = function(x, y)
-	dpadX = x
-	dpadY = y
-	-- No move if dead
-	if Player:isDead() or gsm.state == gsm.States.EndRound then
-		return
-	end
-	Player.Motion = (Player.Forward * y + Player.Right * x) * 40
+	Player.Scale = 0.3
+	cameraCustomFirstPerson()
+	respawn(Player)
 end
 
 Client.OnChat = function(message)
-	if message == "/kill" or message == "!kill" then
+	if message == "!kill" then
 		respawn(Player)
 		return
 	end
-	print(Player.Username .. ": " .. message)
-	local e = Event()
-	e.action = "chat"
-	e.t = Player.Username .. ": " .. message
-	e:SendTo(OtherPlayers)
 end
 
 Client.DidReceiveEvent = function(event)
@@ -352,9 +380,9 @@ Client.DidReceiveEvent = function(event)
 		return
 	end
 
-	if event.action == "chat" then
-		print(event.t)
-	end
+	-- if event.action == "chat" then
+	--  print(event.t)
+	-- end
 	if event.action == "nbKills" then
 		local source = Players[math.floor(event.p)]
 		if not source then
@@ -367,6 +395,12 @@ Client.DidReceiveEvent = function(event)
 	if event.action == "roundEndAt" then
 		uiRoundDuration:update(event.t)
 	end
+end
+
+Client.OnPlayerJoin = function(p)
+	p:HideHandle()
+	p.Shadow = true
+	p.Scale = 0.3
 end
 
 Client.Tick = function(dt)
@@ -394,7 +428,7 @@ end
 
 -- jump function, triggered with Action1
 Client.Action1 = function()
-	if gsm.state == gsm.States.EndRound or Player:isDead() then
+	if gsm.state == gsm.States.EndRound or not Player.isDead or Player:isDead() then
 		return
 	end
 	if Player.IsOnGround then
@@ -406,10 +440,10 @@ Client.Action2 = function()
 	if gsm.state == gsm.States.EndRound then
 		return
 	end
-	weapons:pressShoot()
 	if instructions:isVisible() then
 		instructions:hide()
 	end
+	weapons:pressShoot()
 end
 
 Client.Action2Release = function()
@@ -426,25 +460,27 @@ instructions = {
 
 instructions.display = function(self)
 	if self.bg == nil then
-		local bg = ui:createFrame(Color(0, 0, 0, 0.5))
+		local bg = ui:frameTextBackground()
 
-		local welcomeText = ui:createText("Welcome to Dustzh!", Color.White)
+		local welcomeText = ui:createText("Welcome to Dustzh!", { color = Color.White, size = "big" })
 		welcomeText:setParent(bg)
 
-		local Action1Text = ui:createText("Action1: Jump", Color.White)
+		local Action1Text = ui:createText("Action1: Jump ⬆️", Color.White)
 		Action1Text:setParent(bg)
 
-		local Action2Text = ui:createText("Action2: Shoot", Color.White)
+		local Action2Text = ui:createText("Action2: Shoot 🔫", Color.White)
 		Action2Text:setParent(bg)
 
-		local Action3Text = ui:createText("Action3: Reload", Color.White)
+		local Action3Text = ui:createText("Action3: Reload 🔃", Color.White)
 		Action3Text:setParent(bg)
 
 		local dismissText = ui:createText("(shoot to dismiss)", Color.White, "small")
 		dismissText:setParent(bg)
 
 		bg.parentDidResize = function(self)
-			local padding = 4
+			local theme = require("uitheme").current
+
+			local padding = theme.padding
 			local maxWidth =
 				math.max(welcomeText.Width, Action1Text.Width, Action2Text.Width, Action3Text.Width, dismissText.Width)
 			local height = welcomeText.Height
@@ -554,6 +590,9 @@ end
 
 -- This function create an audio source, not recycled, handled by the developer
 function audioSource(name, parent, sp, v, r)
+	if not AudioSource then
+		return
+	end
 	local as = AudioSource()
 	as.Sound = name
 	as:SetParent(parent or World)
@@ -764,13 +803,9 @@ weaponsMetatable = {
 			end)
 			multi:registerPlayerAction("shoot", function(p, data)
 				if data.rot ~= nil then
-					self:onShoot(
-						p,
-						Number3(data.pos._x, data.pos._y, data.pos._z),
-						Number3(data.rot._x, data.rot._y, data.rot._z)
-					)
+					self:onShoot(p, data.pos, data.rot)
 				else
-					self:onShoot(p, Number3(data.pos._x, data.pos._y, data.pos._z))
+					self:onShoot(p, data.pos)
 				end
 			end)
 			multi:registerPlayerAction("changeWeapon", function(p, data)
@@ -808,7 +843,11 @@ weaponsMetatable = {
 			end
 			s.Pivot = Number3(0.5, 0.5, 0.5)
 			Pointer:Hide()
-			UI.Crosshair = true
+			if UI.Crosshair ~= nil then
+				UI.Crosshair = true
+			else
+				require("crosshair"):show()
+			end
 			local hitMarker = ui:createShape(s)
 			s.Scale = 0.5
 			hitMarker.pos = { Screen.Width / 2 - hitMarker.Width / 2, Screen.Height / 2 - hitMarker.Height / 2, 0 }
@@ -876,14 +915,20 @@ weaponsMetatable = {
 				if p.weapon.rot then
 					p.weapon.LocalRotation = p.weapon.rot + { -0.1 * (p.weapon.mirror and -1 or 1), 0, 0 }
 					Timer(0.05, function()
-						p.weapon.LocalRotation = p.weapon.rot
+						if p.weapon.rot then
+							p.weapon.LocalRotation = p.weapon.rot
+						end
 					end)
 				end
 			else
-				p.RightArm.LocalRotation = p.armRot + { -math.rad(15), 0, 0 }
-				Timer(0.05, function()
-					p.RightArm.LocalRotation = p.armRot
-				end)
+				if p.armRot then
+					p.RightArm.LocalRotation = p.armRot + { -math.rad(15), 0, 0 }
+					Timer(0.05, function()
+						if p.armRot then
+							p.RightArm.LocalRotation = p.armRot
+						end
+					end)
+				end
 			end
 
 			if self.currentWeapon.sfx then
@@ -974,7 +1019,11 @@ weaponsMetatable = {
 			local tmpRot = Player.weapon.LocalRotation:Copy()
 
 			ease:outBack(Player.weapon, 1).LocalPosition = tmpPos + Number3(0, -3, 0)
-			ease:outBack(Player.weapon, 1).LocalRotation = tmpRot + Number3(0.9, 0, 0)
+			if type(Player.weapon.LocalRotation) == "Rotation" then
+				ease:outBack(Player.weapon, 1).LocalRotation = Rotation(-0.9, 0, 0) * tmpRot
+			else
+				ease:outBack(Player.weapon, 1).LocalRotation = tmpRot + Number3(0.9, 0, 0)
+			end
 			Timer(1, function()
 				ease:outBack(Player.weapon, 1).LocalPosition = tmpPos
 				ease:outBack(Player.weapon, 1).LocalRotation = tmpRot
@@ -987,6 +1036,9 @@ weaponsMetatable = {
 			end)
 		end,
 		_tick = function(self, dt)
+			if not Player.hp then
+				return
+			end
 			if self.cooldown > 0 then
 				self.cooldown = self.cooldown - dt
 				return
@@ -1013,7 +1065,7 @@ weaponsMetatable = {
 			end
 
 			-- recul
-			Player.LocalRotation.X = Player.LocalRotation.X - 0.01
+			Player.Head.LocalRotation.X = Player.Head.LocalRotation.X - 0.01
 			Player.LocalRotation.Y = Player.LocalRotation.Y + ((math.random() * 2) - 1) * 0.01
 
 			self.cooldown = self.currentWeapon.cooldown
@@ -1050,17 +1102,32 @@ weaponsMetatable = {
 			if impact and impact.Object.CollisionGroups == Map.CollisionGroups then
 				local impact = Camera:CastRay(impact.Object, Player)
 				local rot = impact.Object.Rotation:Copy()
-				if impact.FaceTouched == Face.Top then
-					rot = rot + { math.pi * 0.5, 0, 0 }
-				end
-				if impact.FaceTouched == Face.Bottom then
-					rot = rot + { math.pi * -0.5, 0, 0 }
-				end
-				if impact.FaceTouched == Face.Left then
-					rot = rot + { 0, math.pi * -0.5, 0 }
-				end
-				if impact.FaceTouched == Face.Right then
-					rot = rot + { 0, math.pi * 0.5, 0 }
+				if type(rot) == "Rotation" then
+					if impact.FaceTouched == Face.Top then
+						rot = Rotation(math.pi * 0.5, 0, 0) * rot
+					end
+					if impact.FaceTouched == Face.Bottom then
+						rot = Rotation(math.pi * -0.5, 0, 0) * rot
+					end
+					if impact.FaceTouched == Face.Left then
+						rot = Rotation(0, math.pi * -0.5, 0) * rot
+					end
+					if impact.FaceTouched == Face.Right then
+						rot = Rotation(0, math.pi * 0.5, 0) * rot
+					end
+				else
+					if impact.FaceTouched == Face.Top then
+						rot = rot + Number3(math.pi * 0.5, 0, 0)
+					end
+					if impact.FaceTouched == Face.Bottom then
+						rot = rot + Number3(math.pi * -0.5, 0, 0)
+					end
+					if impact.FaceTouched == Face.Left then
+						rot = rot + Number3(0, math.pi * -0.5, 0)
+					end
+					if impact.FaceTouched == Face.Right then
+						rot = rot + Number3(0, math.pi * 0.5, 0)
+					end
 				end
 				decalRot = rot
 			end
@@ -1068,16 +1135,18 @@ weaponsMetatable = {
 			multi:playerAction("shoot", { pos = impactPos, rot = decalRot })
 			self:onShoot(Player, impactPos, decalRot)
 
-			if
-				impact and impact.head
-				or (impact.Object and impact.Object:GetChild(1) and type(impact.Object:GetChild(1)) == "Player")
-			then
-				local player
-				if impact.head then
-					player = impact.p
-				else
-					player = impact.Object:GetChild(1)
+			local player
+			if impact.head then
+				player = impact.p
+			elseif impact.Object then
+				for _, p in pairs(Players) do
+					if p ~= Player and p == impact.Object:GetChild(1) then
+						player = p
+					end
 				end
+			end
+
+			if player then
 				if player.hp <= 0 then
 					return
 				end
@@ -1091,10 +1160,18 @@ weaponsMetatable = {
 				self.hitmarkerSFX:Stop()
 				self.hitmarkerSFX:Play()
 				self.hitMarker:show()
-				UI.Crosshair = false
+				if UI.Crosshair == nil then
+					require("crosshair"):hide()
+				else
+					UI.Crosshair = false
+				end
 				Timer(0.1, function()
 					self.hitMarker:hide()
-					UI.Crosshair = true
+					if UI.Crosshair == nil then
+						require("crosshair"):show()
+					else
+						UI.Crosshair = true
+					end
 				end)
 				multi:playerAction("dmg", data)
 				self:damage(data)
@@ -1159,7 +1236,11 @@ weaponsMetatable = {
 		end,
 		setWeapon = function(self, p, id, forceNotFPS)
 			if id == 5 then
-				id = math.random(4)
+				if Client.IsMobile then
+					id = math.random(2) * 2 -- id 0 and 2
+				else
+					id = math.random(4)
+				end
 			end
 
 			local weaponInfo = self.list[id]
@@ -1233,12 +1314,15 @@ weaponsMetatable = {
 	},
 }
 setmetatable(weapons, weaponsMetatable)
-LocalEvent:Listen(LocalEvent.Name.Tick, function(dt)
-	weapons:_tick(dt)
-end)
-LocalEvent:Listen(LocalEvent.Name.OnPlayerJoin, function(p)
-	weapons:_initPlayer(p)
-end)
+
+if type(Client.IsMobile) == "boolean" then --client
+	LocalEvent:Listen(LocalEvent.Name.Tick, function(dt)
+		weapons:_tick(dt)
+	end)
+	LocalEvent:Listen(LocalEvent.Name.OnPlayerJoin, function(p)
+		weapons:_initPlayer(p)
+	end)
+end
 
 --------------------
 -- ROUND DURATION
@@ -1358,7 +1442,7 @@ scoreBoard.create = function(self)
 	node.update = function(self)
 		-- SORT
 		local arr = {}
-		for i, player in ipairs(_players) do
+		for _, player in ipairs(_players) do
 			table.insert(arr, { name = player.Username, score = player[_scoreKey] or 0 })
 		end
 
@@ -1387,235 +1471,6 @@ scoreBoard.create = function(self)
 
 	return node
 end
-
-------------------
--- VICTORY PODIUM
-------------------
-
-victoryPodium = {}
-local victoryPodiumMetatable = {
-	__index = {
-		_isInit = false,
-		podiumPosition = Number3(0, 1000, 0),
-		_podium = nil,
-		init = function(self)
-			self._podium = Object()
-			self._podium:SetParent(World)
-			self._podium.Position = self.podiumPosition - Number3(0, 10, 0)
-			self._podium.IsHidden = true
-			self._podium.Physics = PhysicsMode.Disabled
-
-			local floor = MutableShape()
-			floor:AddBlock(Color.Black, 0, 0, 0)
-			floor:SetParent(self._podium)
-			floor.Pivot = Number3(0.5, 1, 1)
-			floor.Scale.X = 200
-			floor.Scale.Z = 200
-			floor.Physics = PhysicsMode.Disabled
-
-			local wall = MutableShape()
-			wall:AddBlock(Color.Black, 0, 0, 0)
-			wall:SetParent(self._podium)
-			wall.Pivot = Number3(0.5, 0, 0.5)
-			wall.Scale.X = 200
-			wall.Scale.Y = 200
-			wall.Physics = PhysicsMode.Disabled
-
-			local gold = MutableShape()
-			gold:AddBlock(Color.Yellow, 0, 0, 0)
-			gold:SetParent(self._podium)
-			gold.CollidesWithGroups = Player.CollisionGroups
-			gold.Pivot = Number3(0.5, 0, 1)
-			gold.Scale.X = 15
-			gold.Scale.Y = 9
-			gold.Scale.Z = 15
-			gold.LocalPosition = Number3(0, 0, 0)
-
-			local silver = MutableShape()
-			silver:AddBlock(Color.Grey, 0, 0, 0)
-			silver:SetParent(self._podium)
-			silver.CollidesWithGroups = Player.CollisionGroups
-			silver.Pivot = Number3(0.5, 0, 1)
-			silver.Scale.X = 15
-			silver.Scale.Y = 6
-			silver.Scale.Z = 15
-			silver.LocalPosition = Number3(15, 0, 0)
-
-			local bronze = MutableShape()
-			bronze:AddBlock(Color.Orange, 0, 0, 0)
-			bronze:SetParent(self._podium)
-			bronze.CollidesWithGroups = Player.CollisionGroups
-			bronze.Pivot = Number3(0.5, 0, 1)
-			bronze.Scale.X = 15
-			bronze.Scale.Y = 3
-			bronze.Scale.Z = 15
-			bronze.LocalPosition = Number3(-15, 0, 0)
-
-			asApplause = AudioSource()
-			asApplause.Sound = "crowdapplause_1"
-			asApplause.Volume = 0.07
-			asApplause.Spatialized = false
-			self.asApplause = asApplause
-
-			asApplause2 = AudioSource()
-			asApplause2.Sound = "crowdapplause_1"
-			asApplause2.Volume = 0.08
-			asApplause2.Pitch = 0.9
-			asApplause2.Spatialized = false
-			self.asApplause2 = asApplause2
-
-			asApplause3 = AudioSource()
-			asApplause3.Sound = "crowdapplause_1"
-			asApplause3.Volume = 0.09
-			asApplause3.Pitch = 0.95
-			asApplause3.Spatialized = false
-			self.asApplause3 = asApplause3
-
-			self._isInit = true
-		end,
-		stop = function(self)
-			if not self._lastWinners then
-				return
-			end
-
-			-- hide nameplate
-			for _, p in ipairs(self._lastWinners) do
-				pcall(function()
-					if p.nameplate then
-						p.nameplate.IsHidden = true
-					end
-				end)
-			end
-		end,
-		teleportPlayers = function(self, winners)
-			if not self._isInit then
-				print("call victoryPodium:init() first")
-				return
-			end
-
-			if SOUND then
-				local asApplause = self.asApplause
-				local asApplause2 = self.asApplause2
-				local asApplause3 = self.asApplause3
-				self.asApplause:Play()
-				Timer(0.49, function()
-					asApplause2:Play()
-				end)
-				Timer(0.94, function()
-					asApplause3:Play()
-				end)
-				Timer(1.49, function()
-					asApplause:Stop()
-					asApplause:Play()
-				end)
-				Timer(2.1, function()
-					asApplause2:Stop()
-					asApplause2:Play()
-				end)
-				Timer(2.44, function()
-					asApplause3:Stop()
-					asApplause3:Play()
-				end)
-				Timer(2.89, function()
-					asApplause:Stop()
-					asApplause:Play()
-				end)
-				Timer(3.1, function()
-					asApplause2:Stop()
-					asApplause2:Play()
-				end)
-				Timer(3.44, function()
-					asApplause3:Stop()
-					asApplause3:Play()
-				end)
-				Timer(3.89, function()
-					asApplause:Stop()
-					asApplause:Play()
-				end)
-				Timer(4.1, function()
-					asApplause2:Stop()
-					asApplause2:Play()
-				end)
-				Timer(4.44, function()
-					asApplause3:Stop()
-					asApplause3:Play()
-				end)
-			end
-
-			Player.Head.IsHiddenSelf = false
-			Player.Body.IsHiddenSelf = false
-			Player.RightArm.IsHidden = false
-			Player.LeftArm.IsHidden = false
-			Player.RightLeg.IsHidden = false
-			Player.LeftLeg.IsHidden = false
-			for _, v in pairs(Player.equipments) do
-				v.IsHiddenSelf = false
-				if v.attachedParts then
-					for _, v2 in ipairs(v.attachedParts) do
-						v2.IsHiddenSelf = false
-					end
-				end
-			end
-
-			self._podium.IsHidden = false
-
-			self._lastWinners = winners
-
-			Camera:SetModeFree()
-			Camera:SetParent(World)
-			Camera.Position = self.podiumPosition + Number3(0, 10, -40)
-			Camera.Rotation = Number3(0.2, 0, 0)
-
-			pcall(function()
-				local p1 = Players[winners[1].ID]
-				p1.Position = self.podiumPosition + Number3(0, 15, -7.5)
-				p1.Forward = Number3(0, 0, -1)
-				p1.IsHidden = false
-				if not p1.nameplate then
-					p1.nameplate = Text()
-					p1.nameplate.Text = p1.Username
-					p1.nameplate:SetParent(p1.Head)
-					p1.nameplate.LocalRotation = Number3(0, math.pi, 0)
-					p1.nameplate.LocalPosition = Number3(0, 15, 0)
-				end
-				p1.nameplate.IsHidden = false
-			end)
-			if #winners > 1 then
-				pcall(function()
-					local p2 = Players[winners[2].ID]
-					p2.Position = self.podiumPosition + Number3(15, 15, -7.5)
-					p2.Forward = Number3(-0.4, 0, -1)
-					p2.IsHidden = false
-					if not p2.nameplate then
-						p2.nameplate = Text()
-						p2.nameplate.Text = p2.Username
-						p2.nameplate:SetParent(p2.Head)
-						p2.nameplate.LocalRotation = Number3(0, math.pi, 0)
-						p2.nameplate.LocalPosition = Number3(0, 15, 0)
-					end
-					p2.nameplate.IsHidden = false
-				end)
-			end
-			if #winners > 2 then
-				pcall(function()
-					local p3 = Players[winners[3].ID]
-					p3.Position = self.podiumPosition + Number3(-15, 15, -7.5)
-					p3.Forward = Number3(0.4, 0, -1)
-					p3.IsHidden = false
-					if not p3.nameplate then
-						p3.nameplate = Text()
-						p3.nameplate.Text = p3.Username
-						p3.nameplate:SetParent(p3.Head)
-						p3.nameplate.LocalRotation = Number3(0, math.pi, 0)
-						p3.nameplate.LocalPosition = Number3(0, 15, 0)
-					end
-					p3.nameplate.IsHidden = false
-				end)
-			end
-		end,
-	},
-}
-setmetatable(victoryPodium, victoryPodiumMetatable)
 
 ------------------
 -- GAME STATE MANAGER
@@ -1734,9 +1589,9 @@ local gameStateManagerMetatable = {
 		_serverUpdatePlayersInRound = function(self)
 			local playersId = {}
 
-			for _, p in pairs(Players) do
+			for _, p in Players do
 				local alreadyIn = false
-				for _, p2 in ipairs(self.playersInRound) do
+				for _, p2 in self.playersInRound do
 					if p2 == p then
 						alreadyIn = true
 					end
@@ -1825,21 +1680,19 @@ local gameStateManagerMetatable = {
 				self:_serverUpdatePlayersInRound()
 			end
 
-			Timer(1, function()
-				for _, p in ipairs(self.playersInRound) do
-					local e = Event()
-					e.action = "nbKills"
-					e.p = p.ID
-					e.nb = p.nbKills or 0
-					e:SendTo(player)
-				end
-				if gsm.state == gsm.States.Round then
-					local e = Event()
-					e.action = "roundEndAt"
-					e.t = gsm.stateEndAt
-					e:SendTo(player)
-				end
-			end)
+			for _, p in ipairs(self.playersInRound) do
+				local e = Event()
+				e.action = "nbKills"
+				e.p = p.ID
+				e.nb = p.nbKills or 0
+				e:SendTo(player)
+			end
+			if gsm.state == gsm.States.Round then
+				local e = Event()
+				e.action = "roundEndAt"
+				e.t = gsm.stateEndAt
+				e:SendTo(player)
+			end
 		end,
 		serverOnPlayerLeave = function(self, player)
 			for k, p in ipairs(self.playersInRound) do
@@ -2087,18 +1940,18 @@ playerInfo.show = function(self)
 
 	-- if not self.weaponInfo then return end
 
-	-- 		-- display the weapon next to the weapon name
-	-- 		if self.displayedWeapon then self.displayedWeapon:remove() end
-	-- 		if self.templates[self.weaponInfo.item] == nil then return end
+	--      -- display the weapon next to the weapon name
+	--      if self.displayedWeapon then self.displayedWeapon:remove() end
+	--      if self.templates[self.weaponInfo.item] == nil then return end
 
-	-- 		local displayedWeapon = ui:createShape(Shape(self.templates[self.weaponInfo.item]), { spherized = true })
-	-- 		self.displayedWeapon = displayedWeapon
-	--   	  displayedWeapon.parentDidResize = function()
-	-- 		  -- displayedWeapon.Height = self.weaponNameText.Height * 2
-	--   		  -- displayedWeapon.LocalPosition =  self.weaponNameText.pos + Number3(self.weaponNameText.Width + 5, - self.weaponNameText.Height / 2, 0)
-	--  	   end
-	--  	   displayedWeapon.LocalRotation.Y = math.pi / 2
-	--  	   displayedWeapon:parentDidResize()
+	--      local displayedWeapon = ui:createShape(Shape(self.templates[self.weaponInfo.item]), { spherized = true })
+	--      self.displayedWeapon = displayedWeapon
+	--        displayedWeapon.parentDidResize = function()
+	--        -- displayedWeapon.Height = self.weaponNameText.Height * 2
+	--            -- displayedWeapon.LocalPosition =  self.weaponNameText.pos + Number3(self.weaponNameText.Width + 5, - self.weaponNameText.Height / 2, 0)
+	--         end
+	--         displayedWeapon.LocalRotation.Y = math.pi / 2
+	--         displayedWeapon:parentDidResize()
 
 	if not self.hpBar then
 		self.hpBar = hpBar:create()
